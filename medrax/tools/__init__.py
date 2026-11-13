@@ -11,6 +11,9 @@ from .segmentation import *
 from .xray_vqa import *
 from .llava_med import *
 from .grounding import *
-from .generation import *
+try:
+    from .generation import *
+except Exception:
+    pass
 from .dicom import *
 from .utils import *

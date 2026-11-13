@@ -4,7 +4,10 @@ import uuid
 import tempfile
 import torch
 from pydantic import BaseModel, Field
-from diffusers import StableDiffusionPipeline
+try:
+    from diffusers import StableDiffusionPipeline
+except Exception:
+    StableDiffusionPipeline = None
 from langchain_core.callbacks import AsyncCallbackManagerForToolRun, CallbackManagerForToolRun
 from langchain_core.tools import BaseTool
 
