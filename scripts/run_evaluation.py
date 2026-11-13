@@ -227,7 +227,7 @@ def evaluate_baseline_mllm(example: Dict[str, Any], figures_dir: Path, model_nam
         "tools_called": [],
     }
 
-def evaluate_medrax_agent(example: Dict[str, Any], figures_dir: Path, agent: Any, thread_id: str = "1") -> Dict[str, Any]:
+def evaluate_medrax_agent(example: Dict[str, Any], figures_dir: Path, agent: Any, thread_id: str = "1", model_name: str = "") -> Dict[str, Any]:
     from langchain_core.messages import HumanMessage
     
     image_paths = example.get("images", [])
@@ -258,7 +258,12 @@ def evaluate_medrax_agent(example: Dict[str, Any], figures_dir: Path, agent: Any
         f"End your final clinical answer explicitly with: 'Answer: X' (where X is A, B, C, D, E, or F)."
     )
 
-    messages = [HumanMessage(content=[{"type": "text", "text": instruction}] + content_list)]
+    is_vision = any(k in model_name.lower() for k in ["vision", "gpt", "gemini", "claude", "4o", "vl"])
+    if is_vision and content_list:
+        messages = [HumanMessage(content=[{"type": "text", "text": instruction}] + content_list)]
+    else:
+        messages = [HumanMessage(content=instruction)]
+
     thread = {"configurable": {"thread_id": str(thread_id)}}
 
     final_content = ""
@@ -387,7 +392,7 @@ def run_benchmark(
 
             try:
                 if mode == "medrax":
-                    res = evaluate_medrax_agent(row, figures_dir, agent, thread_id=f"t_{idx}")
+                    res = evaluate_medrax_agent(row, figures_dir, agent, thread_id=f"t_{idx}", model_name=model_name)
                 else:
                     res = evaluate_baseline_mllm(row, figures_dir, model_name=model_name)
 
@@ -464,12 +469,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate MedRAX on ChestAgentBench")
     parser.add_argument("--mode", choices=["medrax", "baseline"], default="baseline")
     parser.add_argument("--model", type=str, default="chatgpt-4o-latest")
+    parser.add_argument("--api-key", type=str, default=None, help="API Key (Groq, OpenAI, Gemini)")
+    parser.add_argument("--base-url", type=str, default=None, help="Custom Base URL (e.g. https://api.groq.com/openai/v1)")
     parser.add_argument("--data-dir", type=str, default=os.getenv("BENCHMARK_DATA_DIR", "./data/chestagentbench"))
     parser.add_argument("--output-dir", type=str, default=os.getenv("MEDRAX_RESULTS_DIR", "./results"))
     parser.add_argument("--max-cases", type=int, default=None)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--no-resume", action="store_true")
     args = parser.parse_args()
+
+    # Apply explicit CLI credentials if provided
+    if args.api_key:
+        os.environ["OPENAI_API_KEY"] = args.api_key
+    if args.base_url:
+        os.environ["OPENAI_BASE_URL"] = args.base_url
 
     default_tools = [
         "ChestXRayClassifierTool",
