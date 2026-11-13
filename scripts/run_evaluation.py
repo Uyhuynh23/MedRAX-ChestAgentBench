@@ -9,6 +9,11 @@ Supports:
 """
 
 import os
+# Force transformers to use PyTorch only (prevents TensorFlow protobuf mismatch in Colab Python 3.13)
+os.environ["USE_TF"] = "0"
+os.environ["USE_TORCH"] = "1"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+
 import re
 import sys
 import json
