@@ -99,9 +99,30 @@ def initialize_agent(
     tools_dict = build_tools(tools_to_use, model_dir=model_dir, temp_dir=temp_dir, device=device)
 
     checkpointer = MemorySaver()
-    model = ChatOpenAI(model=model, temperature=temperature, top_p=top_p, **openai_kwargs)
+    
+    # Auto-select Google Gemini or OpenAI backend
+    gemini_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if gemini_key and ("gemini" in str(model).lower() or not os.getenv("OPENAI_API_KEY")):
+        try:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            gemini_model_name = model if "gemini" in str(model).lower() else "gemini-1.5-flash"
+            model_instance = ChatGoogleGenerativeAI(
+                model=gemini_model_name,
+                google_api_key=gemini_key,
+                temperature=temperature,
+                top_p=top_p,
+            )
+            print(f"Agent using native Google Gemini model: {gemini_model_name}")
+        except Exception as e:
+            print(f"Fallback to OpenAI-compatible endpoint: {e}")
+            openai_kwargs["api_key"] = gemini_key
+            openai_kwargs["base_url"] = "https://generativelanguage.googleapis.com/v1beta/openai/"
+            model_instance = ChatOpenAI(model=model, temperature=temperature, top_p=top_p, **openai_kwargs)
+    else:
+        model_instance = ChatOpenAI(model=model, temperature=temperature, top_p=top_p, **openai_kwargs)
+
     agent = Agent(
-        model,
+        model_instance,
         tools=list(tools_dict.values()),
         log_tools=True,
         log_dir="logs",
