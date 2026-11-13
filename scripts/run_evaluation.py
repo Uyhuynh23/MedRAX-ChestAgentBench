@@ -258,7 +258,9 @@ def evaluate_medrax_agent(example: Dict[str, Any], figures_dir: Path, agent: Any
         f"End your final clinical answer explicitly with: 'Answer: X' (where X is A, B, C, D, E, or F)."
     )
 
-    is_vision = any(k in model_name.lower() for k in ["vision", "gpt", "gemini", "claude", "4o", "vl"])
+    base_url_str = (os.getenv("OPENAI_BASE_URL") or "").lower()
+    is_groq = "groq" in base_url_str or "oss" in model_name.lower()
+    is_vision = not is_groq and any(k in model_name.lower() for k in ["vision", "gpt-4", "gemini", "claude", "4o", "vl"])
     if is_vision and content_list:
         messages = [HumanMessage(content=[{"type": "text", "text": instruction}] + content_list)]
     else:
