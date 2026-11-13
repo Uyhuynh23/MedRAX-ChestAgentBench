@@ -65,11 +65,31 @@ def extract_answer_letter(text: str) -> Optional[str]:
         return match.group(1).upper()
     return None
 
+def get_api_credentials(requested_model: str):
+    """Auto-detects credentials and configures OpenAI or Gemini endpoints."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    base_url = os.getenv("OPENAI_BASE_URL", None)
+
+    # If no OpenAI key, check for Google Gemini API key
+    if not api_key or api_key.startswith("your-"):
+        gemini_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        if gemini_key:
+            api_key = gemini_key
+            base_url = base_url or "https://generativelanguage.googleapis.com/v1beta/openai/"
+            if "gpt" in requested_model or requested_model == "chatgpt-4o-latest":
+                requested_model = "gemini-2.5-flash"
+            # Set into env for LangChain/LangGraph tools
+            os.environ["OPENAI_API_KEY"] = gemini_key
+            os.environ["OPENAI_BASE_URL"] = base_url
+
+    return api_key, base_url, requested_model
+
 def evaluate_baseline_mllm(example: Dict[str, Any], figures_dir: Path, model_name: str = "gpt-4o") -> Dict[str, Any]:
     from openai import OpenAI
+    api_key, base_url, effective_model = get_api_credentials(model_name)
     client = OpenAI(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        base_url=os.getenv("OPENAI_BASE_URL", None)
+        api_key=api_key,
+        base_url=base_url
     )
 
     prompt = (
@@ -228,6 +248,9 @@ def run_benchmark(
             filtered.append(r)
         rows = filtered
         print(f"[Filter] Selected {len(rows)} questions across {len(seen_cases)} cases (limit: {max_cases}).")
+
+    api_key, base_url, effective_model = get_api_credentials(model_name)
+    model_name = effective_model
 
     agent = None
     if mode == "medrax":
