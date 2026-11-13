@@ -1,0 +1,21 @@
+# Configuration profile for Colab T4 GPU (15GB VRAM)
+# Prioritizes memory efficiency using 8-bit quantization and selective tools
+
+device: "cuda"
+model: "chatgpt-4o-latest"
+temperature: 0.2
+top_p: 0.95
+
+# Selective tools that fit into 15GB VRAM
+tools:
+  - "ChestXRayClassifierTool"
+  - "ChestXRaySegmentationTool"
+  - "ChestXRayReportGeneratorTool"
+  - "XRayVQATool"
+
+quantization:
+  load_in_8bit: true
+  load_in_4bit: false
+
+batch_size: 1
+max_tokens: 800

@@ -1,0 +1,98 @@
+# ==============================================================================
+# MedRAX + ChestAgentBench Git Ignore Rules
+# ==============================================================================
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Jupyter & IPython
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+.ipython/
+
+# Secrets & Environment Configurations
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+credentials.json
+client_secrets.json
+
+# Model Checkpoints & Pretrained Weights (DO NOT COMMIT LARGE BINARIES)
+checkpoints/
+models/
+model-weights/
+weights/
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+*.onnx
+*.h5
+roentgen/
+maira-2/
+chexagent/
+llavamed/
+
+# Hugging Face Cache & Local Hub
+.cache/
+cache/
+HF_HOME/
+huggingface/
+*.lock
+
+# ChestAgentBench Dataset & Medical Figures
+data/
+figures/
+figures.zip
+chestagentbench/
+benchmark/figures/
+benchmark/figures.zip
+*.tar
+*.tar.gz
+*.zip
+*.7z
+
+# Runtime Outputs & Temporary Files
+temp/
+tmp/
+logs/
+experiments/medrax_logs/
+experiments/results/
+*.log
+
+# OS & IDE specifics
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

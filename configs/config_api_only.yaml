@@ -1,0 +1,12 @@
+# Configuration profile for Direct Vision-Language Model Baseline
+# Zero local GPU footprint, purely leverages API multimodal capabilities
+
+device: "cpu"
+model: "chatgpt-4o-latest"
+temperature: 0.2
+top_p: 0.95
+
+tools: []
+
+batch_size: 1
+max_tokens: 800

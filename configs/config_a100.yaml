@@ -1,0 +1,23 @@
+# Configuration profile for Colab A100 GPU (40GB / 80GB VRAM)
+# Enables the full suite of specialized radiology tools matching the MedRAX ICML paper
+
+device: "cuda"
+model: "chatgpt-4o-latest"
+temperature: 0.2
+top_p: 0.95
+
+# Full tool suite
+tools:
+  - "ChestXRayClassifierTool"
+  - "ChestXRaySegmentationTool"
+  - "ChestXRayReportGeneratorTool"
+  - "XRayVQATool"
+  - "XRayPhraseGroundingTool"
+  - "LlavaMedTool"
+
+quantization:
+  load_in_8bit: true
+  load_in_4bit: false
+
+batch_size: 1
+max_tokens: 1000
