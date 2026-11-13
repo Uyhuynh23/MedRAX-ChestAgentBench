@@ -23,7 +23,7 @@ python-dotenv>=0.19.0
 
 # Specialized Radiology & Vision Tool Dependencies
 torchxrayvision>=0.0.37
-transformers @ git+https://github.com/huggingface/transformers.git@88d960937c81a32bfb63356a2e8ecf7999619681
+transformers @ https://github.com/huggingface/transformers/archive/88d960937c81a32bfb63356a2e8ecf7999619681.zip
 tokenizers>=0.10.0
 sentencepiece>=0.1.95
 shortuuid>=1.0.0
