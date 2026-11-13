@@ -84,9 +84,88 @@ def get_api_credentials(requested_model: str):
 
     return api_key, base_url, requested_model
 
+def evaluate_baseline_gemini(example: Dict[str, Any], figures_dir: Path, model_name: str = "gemini-3.5-flash", api_key: str = None) -> Dict[str, Any]:
+    """Native Google Gemini evaluation with automatic fallback across available Flash models."""
+    import google.generativeai as genai
+    from PIL import Image
+
+    genai.configure(api_key=api_key)
+
+    prompt = (
+        f"You are an expert thoracic radiologist.\n"
+        f"Given the clinical case and thoracic radiographs, answer this multiple choice question.\n\n"
+        f"{example['question']}\n\n"
+        f"Analyze the imaging carefully. State your reasoning, then conclude with 'Answer: X' (where X is A, B, C, D, E, or F)."
+    )
+
+    parts = [prompt]
+    image_paths = example.get("images", [])
+    if isinstance(image_paths, str):
+        image_paths = [image_paths]
+
+    loaded_imgs = 0
+    for img_rel in image_paths:
+        clean = img_rel.replace("figures/", "") if img_rel.startswith("figures/") else img_rel
+        full_img_path = figures_dir / clean
+        if full_img_path.exists():
+            try:
+                img = Image.open(full_img_path).convert("RGB")
+                parts.append(img)
+                loaded_imgs += 1
+            except Exception as e:
+                print(f"[Warning] Failed to load image {full_img_path}: {e}")
+
+    # Fallback to URLs if local images not loaded
+    if loaded_imgs == 0 and "image_source_urls" in example:
+        import requests, io
+        urls = example["image_source_urls"]
+        if isinstance(urls, str):
+            urls = [urls]
+        for u in urls:
+            if u and isinstance(u, str):
+                try:
+                    resp = requests.get(u, timeout=10)
+                    if resp.status_code == 200:
+                        img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+                        parts.append(img)
+                except Exception:
+                    pass
+
+    # Model fallback hierarchy
+    candidate_models = [model_name, "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-flash-latest", "gemini-3.8-flash"]
+    candidate_models = list(dict.fromkeys([m for m in candidate_models if m]))
+
+    raw_response = None
+    last_err = None
+    for cand in candidate_models:
+        try:
+            m = genai.GenerativeModel(cand)
+            resp = m.generate_content(parts)
+            raw_response = resp.text
+            break
+        except Exception as e:
+            last_err = e
+            continue
+
+    if raw_response is None:
+        raise RuntimeError(f"Gemini API generation failed across candidate models: {last_err}")
+
+    pred_letter = extract_answer_letter(raw_response)
+    return {
+        "raw_response": raw_response,
+        "prediction": pred_letter,
+        "tools_called": [],
+    }
+
 def evaluate_baseline_mllm(example: Dict[str, Any], figures_dir: Path, model_name: str = "gpt-4o") -> Dict[str, Any]:
-    from openai import OpenAI
     api_key, base_url, effective_model = get_api_credentials(model_name)
+
+    # Route to native Gemini if Google key is detected or model has gemini in name
+    if (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")) and ("gemini" in model_name or not os.getenv("OPENAI_API_KEY")):
+        gemini_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        return evaluate_baseline_gemini(example, figures_dir, model_name=effective_model, api_key=gemini_key)
+
+    from openai import OpenAI
     client = OpenAI(
         api_key=api_key,
         base_url=base_url
