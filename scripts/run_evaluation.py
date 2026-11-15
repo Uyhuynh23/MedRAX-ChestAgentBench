@@ -71,18 +71,26 @@ def extract_answer_letter(text: str) -> Optional[str]:
     return None
 
 def get_api_credentials(requested_model: str):
-    """Auto-detects credentials and configures OpenAI or Gemini endpoints."""
+    """Auto-detects credentials and configures OpenAI, Local (Ollama/vLLM), or Gemini endpoints."""
     api_key = os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("OPENAI_BASE_URL", None)
 
-    # If no OpenAI key, check for Google Gemini API key
+    # 1. If pointing to local server (Ollama, vLLM, LM Studio), use local endpoint directly
+    if base_url and ("localhost" in base_url or "127.0.0.1" in base_url):
+        return api_key or "ollama", base_url, requested_model
+
+    # 2. If using Groq or custom provider URL, preserve it
+    if base_url and ("groq" in base_url or "api." in base_url):
+        return api_key, base_url, requested_model
+
+    # 3. If no OpenAI key and no custom base_url, check for Google Gemini API key
     if not api_key or api_key.startswith("your-"):
         gemini_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         if gemini_key:
             api_key = gemini_key
             base_url = base_url or "https://generativelanguage.googleapis.com/v1beta/openai/"
             if "gpt" in requested_model or requested_model == "chatgpt-4o-latest":
-                requested_model = "gemini-2.5-flash"
+                requested_model = "gemini-3.5-flash"
             # Set into env for LangChain/LangGraph tools
             os.environ["OPENAI_API_KEY"] = gemini_key
             os.environ["OPENAI_BASE_URL"] = base_url
@@ -165,14 +173,15 @@ def evaluate_baseline_gemini(example: Dict[str, Any], figures_dir: Path, model_n
 def evaluate_baseline_mllm(example: Dict[str, Any], figures_dir: Path, model_name: str = "gpt-4o") -> Dict[str, Any]:
     api_key, base_url, effective_model = get_api_credentials(model_name)
 
-    # Route to native Gemini if Google key is detected or model has gemini in name
-    if (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")) and ("gemini" in model_name or not os.getenv("OPENAI_API_KEY")):
+    # Route to native Gemini if Google key is detected and not a local/custom endpoint
+    is_custom_or_local = base_url and any(k in base_url for k in ["localhost", "127.0.0.1", "groq", "api."])
+    if not is_custom_or_local and (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")) and ("gemini" in model_name or not os.getenv("OPENAI_API_KEY")):
         gemini_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         return evaluate_baseline_gemini(example, figures_dir, model_name=effective_model, api_key=gemini_key)
 
     from openai import OpenAI
     client = OpenAI(
-        api_key=api_key,
+        api_key=api_key or "local",
         base_url=base_url
     )
 
@@ -183,38 +192,41 @@ def evaluate_baseline_mllm(example: Dict[str, Any], figures_dir: Path, model_nam
         f"Analyze the imaging carefully. State your reasoning, then conclude with 'Answer: X' (where X is A, B, C, D, E, or F)."
     )
 
+    # Check if target model supports multimodal image_url
+    is_vision = not is_custom_or_local and any(k in model_name.lower() for k in ["vision", "gpt-4", "gemini", "claude", "4o", "vl"])
     content = [{"type": "text", "text": prompt}]
 
-    # Load local images
-    image_paths = example.get("images", [])
-    if isinstance(image_paths, str):
-        image_paths = [image_paths]
-    
-    loaded_imgs = 0
-    for img_rel in image_paths:
-        clean = img_rel.replace("figures/", "") if img_rel.startswith("figures/") else img_rel
-        full_img_path = figures_dir / clean
-        if full_img_path.exists():
-            b64 = encode_image_base64(str(full_img_path))
-            if b64:
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
-                })
-                loaded_imgs += 1
+    if is_vision:
+        # Load local images
+        image_paths = example.get("images", [])
+        if isinstance(image_paths, str):
+            image_paths = [image_paths]
+        
+        loaded_imgs = 0
+        for img_rel in image_paths:
+            clean = img_rel.replace("figures/", "") if img_rel.startswith("figures/") else img_rel
+            full_img_path = figures_dir / clean
+            if full_img_path.exists():
+                b64 = encode_image_base64(str(full_img_path))
+                if b64:
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+                    })
+                    loaded_imgs += 1
 
-    # Fallback to URLs if local images not found
-    if loaded_imgs == 0 and "image_source_urls" in example:
-        urls = example["image_source_urls"]
-        if isinstance(urls, str):
-            urls = [urls]
-        for u in urls:
-            if u and isinstance(u, str):
-                content.append({"type": "image_url", "image_url": {"url": u}})
+        # Fallback to URLs if local images not found
+        if loaded_imgs == 0 and "image_source_urls" in example:
+            urls = example["image_source_urls"]
+            if isinstance(urls, str):
+                urls = [urls]
+            for u in urls:
+                if u and isinstance(u, str):
+                    content.append({"type": "image_url", "image_url": {"url": u}})
 
     response = client.chat.completions.create(
         model=model_name,
-        messages=[{"role": "user", "content": content}],
+        messages=[{"role": "user", "content": content if is_vision else prompt}],
         temperature=0.2,
         max_tokens=800,
     )
@@ -259,8 +271,8 @@ def evaluate_medrax_agent(example: Dict[str, Any], figures_dir: Path, agent: Any
     )
 
     base_url_str = (os.getenv("OPENAI_BASE_URL") or "").lower()
-    is_groq = "groq" in base_url_str or "oss" in model_name.lower()
-    is_vision = not is_groq and any(k in model_name.lower() for k in ["vision", "gpt-4", "gemini", "claude", "4o", "vl"])
+    is_text_only = any(k in base_url_str for k in ["groq", "localhost", "127.0.0.1"]) or any(k in model_name.lower() for k in ["oss", "qwen2.5", "llama-3"])
+    is_vision = not is_text_only and any(k in model_name.lower() for k in ["vision", "gpt-4", "gemini", "claude", "4o", "vl"])
     if is_vision and content_list:
         messages = [HumanMessage(content=[{"type": "text", "text": instruction}] + content_list)]
     else:
@@ -297,6 +309,7 @@ def run_benchmark(
     tool_list: Optional[List[str]] = None,
     device: str = "cuda",
     resume: bool = True,
+    reset: bool = False,
 ):
     data_path = Path(data_dir).resolve()
     metadata_file = data_path / "metadata.jsonl"
@@ -308,10 +321,16 @@ def run_benchmark(
     pred_file = out_path / "predictions.jsonl"
     summary_file = out_path / "summary.json"
 
-    # Resume handling
+    # Reset or Resume handling
     done_ids = set()
     existing_preds = []
-    if resume and pred_file.exists():
+    if reset:
+        print(f"[Reset] --reset active: Clearing previous predictions in {out_path} to evaluate 100% clean under {model_name}.")
+        if pred_file.exists():
+            pred_file.unlink()
+        if summary_file.exists():
+            summary_file.unlink()
+    elif resume and pred_file.exists():
         with open(pred_file, "r", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
@@ -478,6 +497,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-cases", type=int, default=None)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--no-resume", action="store_true")
+    parser.add_argument("--reset", action="store_true", help="Clear all previous predictions to evaluate 100% fresh under this model")
     args = parser.parse_args()
 
     # Apply explicit CLI credentials if provided
@@ -501,5 +521,6 @@ if __name__ == "__main__":
         max_cases=args.max_cases,
         tool_list=default_tools,
         device=args.device,
-        resume=not args.no_resume,
+        resume=(not args.no_resume and not args.reset),
+        reset=args.reset,
     )

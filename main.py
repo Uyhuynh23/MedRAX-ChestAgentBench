@@ -104,9 +104,15 @@ def initialize_agent(
 
     checkpointer = MemorySaver()
     
-    # Auto-select Google Gemini or OpenAI backend
+    # Auto-select Local server (Ollama/vLLM), Google Gemini, or OpenAI backend
     gemini_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-    if gemini_key and ("gemini" in str(model).lower() or not os.getenv("OPENAI_API_KEY")):
+    base_url_env = os.getenv("OPENAI_BASE_URL", "")
+    is_custom_endpoint = any(k in base_url_env for k in ["localhost", "127.0.0.1", "groq", "api."])
+
+    if is_custom_endpoint:
+        print(f"Agent using custom OpenAI-compatible endpoint: {base_url_env} (model: {model})")
+        model_instance = ChatOpenAI(model=model, temperature=temperature, top_p=top_p, **openai_kwargs)
+    elif gemini_key and ("gemini" in str(model).lower() or not os.getenv("OPENAI_API_KEY")):
         try:
             from langchain_google_genai import ChatGoogleGenerativeAI
             gemini_model_name = model if "gemini" in str(model).lower() else "gemini-1.5-flash"
