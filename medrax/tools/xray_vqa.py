@@ -149,7 +149,18 @@ class XRayVQATool(BaseTool):
                 if not Path(path).is_file():
                     raise FileNotFoundError(f"Image file not found: {path}")
 
-            response = self._generate_response(image_paths, prompt, max_new_tokens)
+            # Cap images to at most 2 images to avoid CUDA OOM during multi-image attention
+            effective_paths = image_paths[:2] if len(image_paths) > 2 else image_paths
+            try:
+                response = self._generate_response(effective_paths, prompt, max_new_tokens)
+            except torch.cuda.OutOfMemoryError:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                # Fallback to single image if multiple images caused OOM
+                response = self._generate_response(effective_paths[:1], prompt, max_new_tokens)
+            finally:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
             output = {
                 "response": response,

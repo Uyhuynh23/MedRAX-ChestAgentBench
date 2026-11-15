@@ -450,6 +450,9 @@ def run_benchmark(
             except Exception as e:
                 print(f"[Error processing QID {qid}]: {e}")
                 time.sleep(2)
+            finally:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
     # Compute Final Summary Metrics
     overall_acc = (correct / total) * 100 if total > 0 else 0.0
