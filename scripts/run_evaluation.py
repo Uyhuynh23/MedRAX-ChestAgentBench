@@ -18,6 +18,7 @@ import re
 import sys
 import json
 import time
+import torch
 import base64
 import argparse
 from pathlib import Path
@@ -412,10 +413,19 @@ def run_benchmark(
             cats = [c.strip() for c in (raw_cats if isinstance(raw_cats, list) else str(raw_cats).split(",")) if c.strip()]
 
             try:
-                if mode == "medrax":
-                    res = evaluate_medrax_agent(row, figures_dir, agent, thread_id=f"t_{idx}", model_name=model_name)
-                else:
-                    res = evaluate_baseline_mllm(row, figures_dir, model_name=model_name)
+                res = None
+                for attempt in range(3):
+                    try:
+                        if mode == "medrax":
+                            res = evaluate_medrax_agent(row, figures_dir, agent, thread_id=f"t_{idx}_{attempt}", model_name=model_name)
+                        else:
+                            res = evaluate_baseline_mllm(row, figures_dir, model_name=model_name)
+                        break
+                    except Exception as e_inner:
+                        if attempt < 2 and any(k in str(e_inner).lower() for k in ["connection", "connect", "timeout"]):
+                            time.sleep(3 * (attempt + 1))
+                            continue
+                        raise e_inner
 
                 pred_letter = res.get("prediction")
                 is_correct = (pred_letter == gold_ans)
