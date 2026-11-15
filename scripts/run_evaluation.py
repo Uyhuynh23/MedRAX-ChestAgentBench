@@ -257,18 +257,24 @@ def evaluate_medrax_agent(example: Dict[str, Any], figures_dir: Path, agent: Any
 
     figure_prompt = "Relevant image files:\n"
     content_list = []
+    valid_map = {}
     
     for img_rel in image_paths:
         clean = img_rel.replace("figures/", "") if img_rel.startswith("figures/") else img_rel
         full_img_path = figures_dir / clean
         if full_img_path.exists():
             figure_prompt += f"- Local image path: {full_img_path}\n"
+            valid_map[Path(clean).name] = str(full_img_path)
+            valid_map[str(clean)] = str(full_img_path)
+            valid_map[str(img_rel)] = str(full_img_path)
             b64 = encode_image_base64(str(full_img_path))
             if b64:
                 content_list.append({
                     "type": "image_url",
                     "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
                 })
+
+    agent.current_case_images = valid_map
 
     instruction = (
         f"{figure_prompt}\n"

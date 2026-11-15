@@ -149,15 +149,19 @@ class Agent:
             clean = p.replace("file://", "").strip()
             if os.path.exists(clean):
                 return clean
+            # First check exact current case images mapping
+            case_images = getattr(self, "current_case_images", {})
+            fname = Path(clean).name
+            if fname in case_images:
+                return case_images[fname]
+            if clean in case_images:
+                return case_images[clean]
+            # Fallback to BENCHMARK_DATA_DIR / figures
             bench_dir = os.getenv("BENCHMARK_DATA_DIR", "")
             if bench_dir:
                 cand = Path(bench_dir) / "figures" / clean
                 if cand.exists():
                     return str(cand)
-                fname = Path(clean).name
-                matches = list((Path(bench_dir) / "figures").glob(f"**/{fname}"))
-                if matches:
-                    return str(matches[0])
             return clean
 
         tool_calls = state["messages"][-1].tool_calls
