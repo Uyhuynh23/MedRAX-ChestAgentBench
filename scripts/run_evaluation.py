@@ -497,7 +497,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-cases", type=int, default=None)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--no-resume", action="store_true")
-    parser.add_argument("--reset", action="store_true", help="Clear all previous predictions to evaluate 100% fresh under this model")
+    parser.add_argument("--reset", action="store_true", help="Clear all previous predictions to evaluate completely fresh (100%%) under this model")
     args = parser.parse_args()
 
     # Apply explicit CLI credentials if provided
