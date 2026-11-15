@@ -61,11 +61,19 @@ def extract_answer_letter(text: str) -> Optional[str]:
     match = re.search(r"\b\**\(([A-F])\)\**\b|\b\*\*([A-F])\*\*\b", text)
     if match:
         return (match.group(1) or match.group(2)).upper()
-    # 3. Match letter at the very end
+    # 3. Match phrasing: "is [A-F]", "select [A-F]", "choose [A-F]"
+    match = re.search(r"\b(?:is|select|choose|indicates|diagnosed as|diagnosis is)\s+([A-F])\b", text, re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
+    # 4. Match letter at the very end
     match = re.search(r"\b([A-F])[\.\)]?\s*$", text.strip())
     if match:
         return match.group(1).upper()
-    # 4. First standalone letter A-F in first 50 chars
+    # 5. Standalone letter followed by colon/dot/paren
+    match = re.search(r"\b([A-F])[\.\:\)]", text)
+    if match:
+        return match.group(1).upper()
+    # 6. First standalone letter A-F in first 50 chars
     match = re.search(r"\b([A-F])\b", text[:50])
     if match:
         return match.group(1).upper()
@@ -285,14 +293,24 @@ def evaluate_medrax_agent(example: Dict[str, Any], figures_dir: Path, agent: Any
     tools_used = []
 
     for event in agent.workflow.stream({"messages": messages}, thread):
-        for val in event.values():
+        for node_name, val in event.items():
             if isinstance(val, dict) and "messages" in val:
-                last_msg = val["messages"][-1]
-                if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-                    for tc in last_msg.tool_calls:
-                        tools_used.append(tc.get("name", "tool"))
-                if hasattr(last_msg, "content") and last_msg.content:
-                    final_content = str(last_msg.content)
+                for msg in val["messages"]:
+                    if hasattr(msg, "tool_calls") and msg.tool_calls:
+                        for tc in msg.tool_calls:
+                            tools_used.append(tc.get("name", "tool"))
+                    # ONLY record response from AIMessage text (never from ToolMessage)
+                    if msg.__class__.__name__ == "AIMessage" and msg.content and isinstance(msg.content, str) and msg.content.strip():
+                        final_content = msg.content
+
+    # If final_content is still empty or tool message, retrieve last AIMessage from full thread history
+    if not final_content:
+        state = agent.workflow.get_state(thread)
+        if state and hasattr(state, "values") and "messages" in state.values:
+            for msg in reversed(state.values["messages"]):
+                if msg.__class__.__name__ == "AIMessage" and msg.content and isinstance(msg.content, str) and msg.content.strip():
+                    final_content = msg.content
+                    break
 
     pred_letter = extract_answer_letter(final_content)
     return {

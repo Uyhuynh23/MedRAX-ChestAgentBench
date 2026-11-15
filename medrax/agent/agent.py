@@ -140,22 +140,49 @@ class Agent:
         Returns:
             Dict[str, List[ToolMessage]]: A dictionary containing tool execution results.
         """
+        import os
+        from pathlib import Path
+
+        def sanitize_path(p: str) -> str:
+            if not isinstance(p, str):
+                return p
+            clean = p.replace("file://", "").strip()
+            if os.path.exists(clean):
+                return clean
+            bench_dir = os.getenv("BENCHMARK_DATA_DIR", "")
+            if bench_dir:
+                cand = Path(bench_dir) / "figures" / clean
+                if cand.exists():
+                    return str(cand)
+                fname = Path(clean).name
+                matches = list((Path(bench_dir) / "figures").glob(f"**/{fname}"))
+                if matches:
+                    return str(matches[0])
+            return clean
+
         tool_calls = state["messages"][-1].tool_calls
         results = []
 
         for call in tool_calls:
-            print(f"Executing tool: {call}")
+            # Auto-sanitize image arguments if LLM passes relative path or file://
+            args = dict(call.get("args", {}))
+            if "image_path" in args and isinstance(args["image_path"], str):
+                args["image_path"] = sanitize_path(args["image_path"])
+            if "image_paths" in args and isinstance(args["image_paths"], list):
+                args["image_paths"] = [sanitize_path(p) for p in args["image_paths"]]
+
+            print(f"Executing tool: {{'name': '{call['name']}', 'args': {args}}}")
             if call["name"] not in self.tools:
                 print("\n....invalid tool....")
                 result = "invalid tool, please retry"
             else:
-                result = self.tools[call["name"]].invoke(call["args"])
+                result = self.tools[call["name"]].invoke(args)
 
             results.append(
                 ToolMessage(
                     tool_call_id=call["id"],
                     name=call["name"],
-                    args=call["args"],
+                    args=args,
                     content=str(result),
                 )
             )
