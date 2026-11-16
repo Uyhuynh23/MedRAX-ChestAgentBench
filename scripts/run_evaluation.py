@@ -426,67 +426,93 @@ def run_benchmark(
             if is_corr:
                 cat_correct[cat] += 1
 
-    with open(pred_file, "a", encoding="utf-8") as out_f:
-        for idx, row in enumerate(rows, 1):
-            qid = str(row.get("question_id", ""))
-            if qid in done_ids:
-                continue
+    BATCH_SIZE = 10  # Flush to Google Drive every N questions
+    pending_records = []
 
-            gold_ans = str(row.get("answer", "")).strip().upper()
-            raw_cats = row.get("categories", "")
-            cats = [c.strip() for c in (raw_cats if isinstance(raw_cats, list) else str(raw_cats).split(",")) if c.strip()]
+    def flush_batch(records):
+        """Append a batch of records to the prediction file and force-sync to Drive."""
+        if not records:
+            return
+        with open(pred_file, "a", encoding="utf-8") as out_f:
+            for rec in records:
+                out_f.write(json.dumps(rec) + "\n")
+            out_f.flush()
+            os.fsync(out_f.fileno())
 
-            try:
-                res = None
-                for attempt in range(3):
-                    try:
-                        if mode == "medrax":
-                            res = evaluate_medrax_agent(row, figures_dir, agent, thread_id=f"t_{idx}_{attempt}", model_name=model_name)
-                        else:
-                            res = evaluate_baseline_mllm(row, figures_dir, model_name=model_name)
-                        break
-                    except Exception as e_inner:
-                        if attempt < 2 and any(k in str(e_inner).lower() for k in ["connection", "connect", "timeout"]):
-                            time.sleep(3 * (attempt + 1))
-                            continue
-                        raise e_inner
+    for idx, row in enumerate(rows, 1):
+        qid = str(row.get("question_id", ""))
+        if qid in done_ids:
+            continue
 
-                pred_letter = res.get("prediction")
-                is_correct = (pred_letter == gold_ans)
+        gold_ans = str(row.get("answer", "")).strip().upper()
+        raw_cats = row.get("categories", "")
+        cats = [c.strip() for c in (raw_cats if isinstance(raw_cats, list) else str(raw_cats).split(",")) if c.strip()]
 
-                total += 1
+        try:
+            res = None
+            for attempt in range(3):
+                try:
+                    if mode == "medrax":
+                        res = evaluate_medrax_agent(row, figures_dir, agent, thread_id=f"t_{idx}_{attempt}", model_name=model_name)
+                    else:
+                        res = evaluate_baseline_mllm(row, figures_dir, model_name=model_name)
+                    break
+                except Exception as e_inner:
+                    if attempt < 2 and any(k in str(e_inner).lower() for k in ["connection", "connect", "timeout"]):
+                        time.sleep(3 * (attempt + 1))
+                        continue
+                    raise e_inner
+
+            pred_letter = res.get("prediction")
+            is_correct = (pred_letter == gold_ans)
+
+            total += 1
+            if is_correct:
+                correct += 1
+
+            for cat in cats:
+                cat_total[cat] += 1
                 if is_correct:
-                    correct += 1
+                    cat_correct[cat] += 1
 
-                for cat in cats:
-                    cat_total[cat] += 1
-                    if is_correct:
-                        cat_correct[cat] += 1
+            record = {
+                "question_id": qid,
+                "case_id": row.get("case_id"),
+                "gold_answer": gold_ans,
+                "prediction": pred_letter,
+                "is_correct": is_correct,
+                "categories": cats,
+                "tools_called": res.get("tools_called", []),
+                "raw_response": res.get("raw_response", ""),
+                "timestamp": datetime.now().isoformat(),
+            }
+            pending_records.append(record)
 
-                record = {
-                    "question_id": qid,
-                    "case_id": row.get("case_id"),
-                    "gold_answer": gold_ans,
-                    "prediction": pred_letter,
-                    "is_correct": is_correct,
-                    "categories": cats,
-                    "tools_called": res.get("tools_called", []),
-                    "raw_response": res.get("raw_response", ""),
-                    "timestamp": datetime.now().isoformat(),
-                }
-                out_f.write(json.dumps(record) + "\n")
-                out_f.flush()
+            curr_acc = (correct / total) * 100 if total > 0 else 0
+            status_symbol = "✓" if is_correct else "✗"
+            print(f"[{idx}/{len(rows)}] QID: {qid} | Pred: {pred_letter} Gold: {gold_ans} {status_symbol} | Running Acc: {curr_acc:.2f}% ({correct}/{total})")
 
-                curr_acc = (correct / total) * 100 if total > 0 else 0
-                status_symbol = "✓" if is_correct else "✗"
-                print(f"[{idx}/{len(rows)}] QID: {qid} | Pred: {pred_letter} Gold: {gold_ans} {status_symbol} | Running Acc: {curr_acc:.2f}% ({correct}/{total})")
+            # Batch commit: force-sync every BATCH_SIZE questions to Google Drive
+            if len(pending_records) >= BATCH_SIZE:
+                flush_batch(pending_records)
+                pending_records = []
+                print(f"  [Drive Sync] Flushed batch to Google Drive at question {idx}.")
 
-            except Exception as e:
-                print(f"[Error processing QID {qid}]: {e}")
-                time.sleep(2)
-            finally:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+        except Exception as e:
+            print(f"[Error processing QID {qid}]: {e}")
+            # Flush any pending records before sleeping to avoid data loss
+            if pending_records:
+                flush_batch(pending_records)
+                pending_records = []
+            time.sleep(2)
+        finally:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    # Final flush for any remaining records
+    if pending_records:
+        flush_batch(pending_records)
+        print(f"  [Drive Sync] Final flush: {len(pending_records)} remaining records saved to Google Drive.")
 
     # Compute Final Summary Metrics
     overall_acc = (correct / total) * 100 if total > 0 else 0.0
