@@ -165,14 +165,14 @@ def get_api_credentials(requested_model: str):
             api_key = active_gemini_key
             base_url = base_url or "https://generativelanguage.googleapis.com/v1beta/openai/"
             if "gpt" in requested_model or requested_model == "chatgpt-4o-latest":
-                requested_model = "gemini-1.5-flash"
+                requested_model = "gemini-2.0-flash"
             # Set into env for LangChain/LangGraph tools
             os.environ["OPENAI_API_KEY"] = active_gemini_key
             os.environ["OPENAI_BASE_URL"] = base_url
 
     return api_key, base_url, requested_model
 
-def evaluate_baseline_gemini(example: Dict[str, Any], figures_dir: Path, model_name: str = "gemini-1.5-flash", api_key: str = None) -> Dict[str, Any]:
+def evaluate_baseline_gemini(example: Dict[str, Any], figures_dir: Path, model_name: str = "gemini-2.0-flash", api_key: str = None) -> Dict[str, Any]:
     """Native Google Gemini evaluation with automatic fallback across keys and available Flash models."""
     import google.generativeai as genai
     from PIL import Image
@@ -218,7 +218,7 @@ def evaluate_baseline_gemini(example: Dict[str, Any], figures_dir: Path, model_n
                     pass
 
     # Model fallback hierarchy
-    candidate_models = [model_name, "gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-flash-latest"]
+    candidate_models = [model_name, "gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-flash-latest"]
     candidate_models = list(dict.fromkeys([m for m in candidate_models if m]))
 
     raw_response = None
