@@ -41,7 +41,7 @@ CATEGORIES_LIST = [
     "Characterization",
 ]
 
-def encode_image_base64(image_path: str, max_dim: int = 1024) -> Optional[str]:
+def encode_image_base64(image_path: str, max_dim: int = 768) -> Optional[str]:
     try:
         from PIL import Image
         import io
@@ -60,50 +60,62 @@ def encode_image_base64(image_path: str, max_dim: int = 1024) -> Optional[str]:
             print(f"[Warning] Failed to read {image_path}: {e}")
             return None
 
-def extract_message_text(content: Any) -> str:
-    """Extracts text cleanly whether AIMessage.content is a string or a list of content blocks."""
-    if not content:
-        return ""
+def extract_message_text(content: Any, msg_obj: Any = None) -> str:
+    """Extracts text cleanly whether AIMessage.content is a string, a list of content blocks, or in reasoning_content."""
+    txt = ""
     if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
+        txt = content.strip()
+    elif isinstance(content, list):
         parts = []
         for item in content:
             if isinstance(item, str):
                 parts.append(item)
             elif isinstance(item, dict) and "text" in item:
                 parts.append(str(item["text"]))
-        return "\n".join(parts).strip()
-    return str(content).strip()
+        txt = "\n".join(parts).strip()
+    elif content:
+        txt = str(content).strip()
+    if not txt and msg_obj is not None:
+        ak = getattr(msg_obj, "additional_kwargs", None) or {}
+        txt = str(ak.get("reasoning_content") or ak.get("reasoning") or "").strip()
+    return txt
 
 def extract_answer_letter(text: str) -> Optional[str]:
-    """Robust extraction of A-F choice from model response."""
+    """Robust extraction of A-F choice from model response (supports Qwen3 <think> blocks)."""
     if not text:
         return None
-    # 1. Match explicit pattern: Answer: [A-F] or Option: [A-F] or [A-F])
-    match = re.search(r"(?:final answer|answer|choice|option)[\s:]*([A-F])\b", text, re.IGNORECASE)
-    if match:
-        return match.group(1).upper()
-    # 2. Match bold **A** or (A)
-    match = re.search(r"\b\**\(([A-F])\)\**\b|\b\*\*([A-F])\*\*\b", text)
-    if match:
-        return (match.group(1) or match.group(2)).upper()
-    # 3. Match phrasing: "is [A-F]", "select [A-F]", "choose [A-F]"
-    match = re.search(r"\b(?:is|select|choose|indicates|diagnosed as|diagnosis is)\s+([A-F])\b", text, re.IGNORECASE)
-    if match:
-        return match.group(1).upper()
-    # 4. Match letter at the very end
-    match = re.search(r"\b([A-F])[\.\)]?\s*$", text.strip())
-    if match:
-        return match.group(1).upper()
-    # 5. Standalone letter followed by colon/dot/paren
-    match = re.search(r"\b([A-F])[\.\:\)]", text)
-    if match:
-        return match.group(1).upper()
-    # 6. First standalone letter A-F in first 50 chars
-    match = re.search(r"\b([A-F])\b", text[:50])
-    if match:
-        return match.group(1).upper()
+    # Strip closed <think>...</think> blocks first so intermediate thoughts don't pollute answer extraction
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    if "</think>" in cleaned:
+        cleaned = cleaned.split("</think>")[-1].strip()
+    target = cleaned if cleaned else text.strip()
+
+    for candidate_text in ([target, text.strip()] if target != text.strip() else [target]):
+        # 1. Match explicit pattern: Final Answer: [A-F] or Answer: [A-F] (take last match)
+        matches = re.findall(r"(?:final\s+answer|answer)[\s\*:\-]*\(?([A-F])\)?\b", candidate_text, re.IGNORECASE)
+        if matches:
+            return matches[-1].upper()
+        # 2. Match explicit choice/option conclusion at end of reasoning (take last match)
+        matches = re.findall(r"(?:correct\s+(?:answer|choice|option)\s+is|choice\s*[:is]+|option\s*[:is]+)[\s\*:\-]*\(?([A-F])\)?\b", candidate_text, re.IGNORECASE)
+        if matches:
+            return matches[-1].upper()
+        # 3. Match bold **A** or (A) (take last match)
+        matches = re.findall(r"\b\**\(([A-F])\)\**\b|\b\*\*([A-F])\*\*\b", candidate_text)
+        if matches:
+            last_m = matches[-1]
+            return (last_m[0] or last_m[1]).upper()
+        # 4. Match phrasing: "is [A-F]", "select [A-F]", "choose [A-F]" (take last match)
+        matches = re.findall(r"\b(?:is|select|choose|indicates|diagnosed as|diagnosis is)\s+\(?([A-F])\)?\b", candidate_text, re.IGNORECASE)
+        if matches:
+            return matches[-1].upper()
+        # 5. Match letter at the very end
+        match = re.search(r"\b([A-F])[\.\)]?\s*$", candidate_text.strip())
+        if match:
+            return match.group(1).upper()
+        # 6. First standalone letter A-F in first 50 chars
+        match = re.search(r"\b([A-F])\b", candidate_text[:50])
+        if match:
+            return match.group(1).upper()
     return None
 
 class GeminiKeyPool:
@@ -310,18 +322,21 @@ def evaluate_baseline_mllm(example: Dict[str, Any], figures_dir: Path, model_nam
         f"Analyze the imaging carefully. State your reasoning, then conclude with 'Answer: X' (where X is A, B, C, D, E, or F)."
     )
 
-    # Check if target model supports multimodal image_url
-    is_vision = not is_custom_or_local and any(k in model_name.lower() for k in ["vision", "gpt-4", "gemini", "claude", "4o", "vl"])
+    # Check if target model supports multimodal image_url (including local VLM models like qwen3-vl:4b)
+    has_vision_tag = any(k in model_name.lower() for k in ["vl", "vision", "llava", "minicpm", "pixtral", "gemma3"])
+    is_vision = has_vision_tag or (not is_custom_or_local and any(k in model_name.lower() for k in ["gpt-4", "gemini", "claude", "4o"]))
     content = [{"type": "text", "text": prompt}]
 
     if is_vision:
-        # Load local images
+        # Load local images (cap at 2 images to keep local GPU VRAM low)
         image_paths = example.get("images", [])
         if isinstance(image_paths, str):
             image_paths = [image_paths]
         
         loaded_imgs = 0
         for img_rel in image_paths:
+            if loaded_imgs >= 2:
+                break
             clean = img_rel.replace("figures/", "") if img_rel.startswith("figures/") else img_rel
             full_img_path = figures_dir / clean
             if full_img_path.exists():
@@ -338,7 +353,7 @@ def evaluate_baseline_mllm(example: Dict[str, Any], figures_dir: Path, model_nam
             urls = example["image_source_urls"]
             if isinstance(urls, str):
                 urls = [urls]
-            for u in urls:
+            for u in urls[:2]:
                 if u and isinstance(u, str):
                     content.append({"type": "image_url", "image_url": {"url": u}})
 
@@ -346,9 +361,13 @@ def evaluate_baseline_mllm(example: Dict[str, Any], figures_dir: Path, model_nam
         model=model_name,
         messages=[{"role": "user", "content": content if is_vision else prompt}],
         temperature=0.2,
-        max_tokens=800,
+        max_tokens=2048,
     )
-    raw_response = response.choices[0].message.content
+    msg_obj = response.choices[0].message
+    raw_response = msg_obj.content or ""
+    if not raw_response.strip():
+        extra = getattr(msg_obj, "model_extra", None) or {}
+        raw_response = getattr(msg_obj, "reasoning_content", None) or extra.get("reasoning") or extra.get("reasoning_content") or ""
     pred_letter = extract_answer_letter(raw_response)
 
     return {
@@ -376,7 +395,7 @@ def evaluate_medrax_agent(example: Dict[str, Any], figures_dir: Path, agent: Any
             valid_map[Path(clean).name] = str(full_img_path)
             valid_map[str(clean)] = str(full_img_path)
             valid_map[str(img_rel)] = str(full_img_path)
-            if len(content_list) < 4:
+            if len(content_list) < 2:
                 b64 = encode_image_base64(str(full_img_path))
                 if b64:
                     content_list.append({
@@ -396,8 +415,12 @@ def evaluate_medrax_agent(example: Dict[str, Any], figures_dir: Path, agent: Any
     )
 
     base_url_str = (os.getenv("OPENAI_BASE_URL") or "").lower()
-    is_text_only = any(k in base_url_str for k in ["groq", "localhost", "127.0.0.1"]) or any(k in model_name.lower() for k in ["oss", "qwen2.5", "llama-3"])
-    is_vision = not is_text_only and any(k in model_name.lower() for k in ["vision", "gpt-4", "gemini", "claude", "4o", "vl"])
+    has_vision_tag = any(k in model_name.lower() for k in ["vl", "vision", "llava", "minicpm", "pixtral", "gemma3"])
+    is_text_only = not has_vision_tag and (
+        any(k in base_url_str for k in ["groq", "localhost", "127.0.0.1"])
+        or any(k in model_name.lower() for k in ["oss", "qwen2.5:", "llama-3"])
+    )
+    is_vision = has_vision_tag or (not is_text_only and any(k in model_name.lower() for k in ["gpt-4", "gemini", "claude", "4o"]))
     if is_vision and content_list:
         messages = [HumanMessage(content=[{"type": "text", "text": instruction}] + content_list)]
     else:
@@ -408,36 +431,41 @@ def evaluate_medrax_agent(example: Dict[str, Any], figures_dir: Path, agent: Any
     final_content = ""
     tools_used = []
 
-    for event in agent.workflow.stream({"messages": messages}, thread):
-        for node_name, val in event.items():
-            if isinstance(val, dict) and "messages" in val:
-                for msg in val["messages"]:
-                    if hasattr(msg, "tool_calls") and msg.tool_calls:
-                        for tc in msg.tool_calls:
-                            tools_used.append(tc.get("name", "tool"))
-                    # ONLY record response from AIMessage text (never from ToolMessage)
-                    if msg.__class__.__name__ == "AIMessage":
-                        msg_txt = extract_message_text(msg.content)
-                        if msg_txt:
-                            final_content = msg_txt
+    def _run_stream(msgs, th_cfg):
+        nonlocal final_content
+        for event in agent.workflow.stream({"messages": msgs}, th_cfg):
+            for node_name, val in event.items():
+                if isinstance(val, dict) and "messages" in val:
+                    for msg in val["messages"]:
+                        if hasattr(msg, "tool_calls") and msg.tool_calls:
+                            for tc in msg.tool_calls:
+                                tools_used.append(tc.get("name", "tool"))
+                        if msg.__class__.__name__ == "AIMessage":
+                            msg_txt = extract_message_text(msg.content, msg)
+                            if msg_txt:
+                                final_content = msg_txt
 
-    # If final_content is still empty or tool message, retrieve last AIMessage from full thread history
+    try:
+        _run_stream(messages, thread)
+    except Exception as e_stream:
+        if is_vision and content_list:
+            # Fallback to text instruction if multimodal + tool_calls stream encountered protocol error
+            fb_thread = {"configurable": {"thread_id": f"{thread_id}_fb"}}
+            _run_stream([HumanMessage(content=instruction)], fb_thread)
+            thread = fb_thread
+        else:
+            raise e_stream
+
+    # If final_content is still empty, retrieve last AIMessage from full thread history
     if not final_content:
         state = agent.workflow.get_state(thread)
         if state and hasattr(state, "values") and "messages" in state.values:
             for msg in reversed(state.values["messages"]):
                 if msg.__class__.__name__ == "AIMessage":
-                    msg_txt = extract_message_text(msg.content)
+                    msg_txt = extract_message_text(msg.content, msg)
                     if msg_txt:
                         final_content = msg_txt
                         break
-
-    # Advance round-robin key pool for next question in MedRAX mode to distribute RPM load across keys
-    if "gemini" in model_name.lower() and len(GEMINI_KEY_POOL.keys) > 1:
-        GEMINI_KEY_POOL.advance()
-        next_key = GEMINI_KEY_POOL.get_key()
-        if next_key:
-            update_agent_api_key(agent, next_key, model_name=model_name)
 
     pred_letter = extract_answer_letter(final_content)
     return {
