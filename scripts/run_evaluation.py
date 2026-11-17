@@ -79,6 +79,70 @@ def extract_answer_letter(text: str) -> Optional[str]:
         return match.group(1).upper()
     return None
 
+class GeminiKeyPool:
+    """Manages rotation and failover across multiple Gemini API keys."""
+
+    def __init__(self, key_str: Optional[str] = None):
+        self.reload(key_str)
+
+    def reload(self, key_str: Optional[str] = None):
+        raw = key_str or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
+        self.keys = [k.strip() for k in raw.split(",") if k.strip()]
+        self.idx = 0
+        self.exhausted = set()
+
+    def has_keys(self) -> bool:
+        return len(self.keys) > 0
+
+    def get_key(self) -> Optional[str]:
+        if not self.keys:
+            return None
+        for _ in range(len(self.keys)):
+            k = self.keys[self.idx]
+            if k not in self.exhausted:
+                return k
+            self.idx = (self.idx + 1) % len(self.keys)
+        self.exhausted.clear()
+        return self.keys[self.idx]
+
+    def advance(self):
+        """Round-robin step to keep per-key rate limits low."""
+        if len(self.keys) > 1:
+            self.idx = (self.idx + 1) % len(self.keys)
+
+    def mark_exhausted_and_switch(self, err_msg: str = "") -> Optional[str]:
+        if not self.keys:
+            return None
+        bad_key = self.keys[self.idx]
+        self.exhausted.add(bad_key)
+        old_idx = self.idx
+        self.idx = (self.idx + 1) % len(self.keys)
+        new_key = self.keys[self.idx]
+        masked_old = f"...{bad_key[-6:]}" if len(bad_key) >= 6 else "***"
+        masked_new = f"...{new_key[-6:]}" if len(new_key) >= 6 else "***"
+        print(f"  🔄 [Key Rotation] Key #{old_idx+1} ({masked_old}) hit limit. Switched to Key #{self.idx+1} ({masked_new}). Reason: {err_msg[:60]}")
+        return new_key
+
+GEMINI_KEY_POOL = GeminiKeyPool()
+
+def update_agent_api_key(agent, new_key: str):
+    """Updates API key in-place inside LangChain agent model without full reinitialization."""
+    if not agent or not new_key:
+        return
+    if hasattr(agent, "model") and hasattr(agent.model, "bound"):
+        bound = agent.model.bound
+        if hasattr(bound, "google_api_key"):
+            bound.google_api_key = new_key
+            if hasattr(bound, "client"):
+                bound.client = None
+        if hasattr(bound, "api_key"):
+            bound.api_key = new_key
+            if hasattr(bound, "client"):
+                bound.client = None
+    os.environ["GOOGLE_API_KEY"] = new_key
+    os.environ["GEMINI_API_KEY"] = new_key
+    os.environ["OPENAI_API_KEY"] = new_key
+
 def get_api_credentials(requested_model: str):
     """Auto-detects credentials and configures OpenAI, Local (Ollama/vLLM), or Gemini endpoints."""
     api_key = os.getenv("OPENAI_API_KEY")
@@ -94,24 +158,24 @@ def get_api_credentials(requested_model: str):
 
     # 3. If no OpenAI key and no custom base_url, check for Google Gemini API key
     if not api_key or api_key.startswith("your-"):
-        gemini_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-        if gemini_key:
-            api_key = gemini_key
+        gemini_key_raw = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        if gemini_key_raw:
+            GEMINI_KEY_POOL.reload(gemini_key_raw)
+            active_gemini_key = GEMINI_KEY_POOL.get_key()
+            api_key = active_gemini_key
             base_url = base_url or "https://generativelanguage.googleapis.com/v1beta/openai/"
             if "gpt" in requested_model or requested_model == "chatgpt-4o-latest":
                 requested_model = "gemini-1.5-flash"
             # Set into env for LangChain/LangGraph tools
-            os.environ["OPENAI_API_KEY"] = gemini_key
+            os.environ["OPENAI_API_KEY"] = active_gemini_key
             os.environ["OPENAI_BASE_URL"] = base_url
 
     return api_key, base_url, requested_model
 
 def evaluate_baseline_gemini(example: Dict[str, Any], figures_dir: Path, model_name: str = "gemini-1.5-flash", api_key: str = None) -> Dict[str, Any]:
-    """Native Google Gemini evaluation with automatic fallback across available Flash models."""
+    """Native Google Gemini evaluation with automatic fallback across keys and available Flash models."""
     import google.generativeai as genai
     from PIL import Image
-
-    genai.configure(api_key=api_key)
 
     prompt = (
         f"You are an expert thoracic radiologist.\n"
@@ -159,18 +223,36 @@ def evaluate_baseline_gemini(example: Dict[str, Any], figures_dir: Path, model_n
 
     raw_response = None
     last_err = None
-    for cand in candidate_models:
-        try:
-            m = genai.GenerativeModel(cand)
-            resp = m.generate_content(parts)
-            raw_response = resp.text
+
+    max_key_attempts = max(1, len(GEMINI_KEY_POOL.keys))
+    for _ in range(max_key_attempts):
+        active_key = GEMINI_KEY_POOL.get_key() or api_key
+        genai.configure(api_key=active_key)
+        hit_quota = False
+
+        for cand in candidate_models:
+            try:
+                m = genai.GenerativeModel(cand)
+                resp = m.generate_content(parts)
+                raw_response = resp.text
+                GEMINI_KEY_POOL.advance()
+                break
+            except Exception as e:
+                last_err = e
+                err_str = str(e).lower()
+                if any(k in err_str for k in ["429", "quota", "resource_exhausted", "rate limit", "too many requests"]):
+                    GEMINI_KEY_POOL.mark_exhausted_and_switch(str(e))
+                    hit_quota = True
+                    break
+                continue
+
+        if raw_response is not None:
             break
-        except Exception as e:
-            last_err = e
-            continue
+        if not hit_quota:
+            break
 
     if raw_response is None:
-        raise RuntimeError(f"Gemini API generation failed across candidate models: {last_err}")
+        raise RuntimeError(f"Gemini API generation failed across candidate models and keys: {last_err}")
 
     pred_letter = extract_answer_letter(raw_response)
     return {
@@ -453,7 +535,8 @@ def run_benchmark(
 
         try:
             res = None
-            for attempt in range(3):
+            max_attempts = max(3, len(GEMINI_KEY_POOL.keys) * 2)
+            for attempt in range(max_attempts):
                 try:
                     if mode == "medrax":
                         res = evaluate_medrax_agent(row, figures_dir, agent, thread_id=f"t_{idx}_{attempt}", model_name=model_name)
@@ -461,7 +544,14 @@ def run_benchmark(
                         res = evaluate_baseline_mllm(row, figures_dir, model_name=model_name)
                     break
                 except Exception as e_inner:
-                    if attempt < 2 and any(k in str(e_inner).lower() for k in ["connection", "connect", "timeout"]):
+                    err_str = str(e_inner).lower()
+                    if any(k in err_str for k in ["429", "quota", "resource_exhausted", "rate limit", "too many requests"]):
+                        new_k = GEMINI_KEY_POOL.mark_exhausted_and_switch(str(e_inner))
+                        if mode == "medrax" and new_k and agent:
+                            update_agent_api_key(agent, new_k)
+                        time.sleep(2)
+                        continue
+                    if attempt < 2 and any(k in err_str for k in ["connection", "connect", "timeout"]):
                         time.sleep(3 * (attempt + 1))
                         continue
                     raise e_inner

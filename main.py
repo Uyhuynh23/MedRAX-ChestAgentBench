@@ -105,7 +105,8 @@ def initialize_agent(
     checkpointer = MemorySaver()
     
     # Auto-select Local server (Ollama/vLLM), Google Gemini, or OpenAI backend
-    gemini_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    gemini_key_raw = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    gemini_key = gemini_key_raw.split(",")[0].strip() if gemini_key_raw else None
     base_url_env = os.getenv("OPENAI_BASE_URL", "")
     is_custom_endpoint = any(k in base_url_env for k in ["localhost", "127.0.0.1", "groq", "api."])
 
