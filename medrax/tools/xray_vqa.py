@@ -81,11 +81,15 @@ class XRayVQATool(BaseTool):
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             device_map=self.device,
+            torch_dtype=self.dtype,
+            low_cpu_mem_usage=True,
             trust_remote_code=True,
             cache_dir=cache_dir,
         )
         self.model = self.model.to(dtype=self.dtype)
         self.model.eval()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         transformers.__version__ = original_transformers_version
 
