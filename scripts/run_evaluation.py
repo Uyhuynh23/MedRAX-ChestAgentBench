@@ -99,14 +99,14 @@ def get_api_credentials(requested_model: str):
             api_key = gemini_key
             base_url = base_url or "https://generativelanguage.googleapis.com/v1beta/openai/"
             if "gpt" in requested_model or requested_model == "chatgpt-4o-latest":
-                requested_model = "gemini-3.5-flash"
+                requested_model = "gemini-1.5-flash"
             # Set into env for LangChain/LangGraph tools
             os.environ["OPENAI_API_KEY"] = gemini_key
             os.environ["OPENAI_BASE_URL"] = base_url
 
     return api_key, base_url, requested_model
 
-def evaluate_baseline_gemini(example: Dict[str, Any], figures_dir: Path, model_name: str = "gemini-3.5-flash", api_key: str = None) -> Dict[str, Any]:
+def evaluate_baseline_gemini(example: Dict[str, Any], figures_dir: Path, model_name: str = "gemini-1.5-flash", api_key: str = None) -> Dict[str, Any]:
     """Native Google Gemini evaluation with automatic fallback across available Flash models."""
     import google.generativeai as genai
     from PIL import Image
@@ -154,7 +154,7 @@ def evaluate_baseline_gemini(example: Dict[str, Any], figures_dir: Path, model_n
                     pass
 
     # Model fallback hierarchy
-    candidate_models = [model_name, "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-flash-latest", "gemini-3.8-flash"]
+    candidate_models = [model_name, "gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-flash-latest"]
     candidate_models = list(dict.fromkeys([m for m in candidate_models if m]))
 
     raw_response = None
@@ -421,7 +421,10 @@ def run_benchmark(
         total += 1
         if is_corr:
             correct += 1
-        for cat in p.get("categories", []):
+        p_cats = p.get("categories") or p.get("category") or []
+        if isinstance(p_cats, str):
+            p_cats = [c.strip() for c in p_cats.split(",") if c.strip()]
+        for cat in p_cats:
             cat_total[cat] += 1
             if is_corr:
                 cat_correct[cat] += 1
@@ -445,7 +448,7 @@ def run_benchmark(
             continue
 
         gold_ans = str(row.get("answer", "")).strip().upper()
-        raw_cats = row.get("categories", "")
+        raw_cats = row.get("categories") or row.get("category") or ""
         cats = [c.strip() for c in (raw_cats if isinstance(raw_cats, list) else str(raw_cats).split(",")) if c.strip()]
 
         try:
@@ -518,8 +521,8 @@ def run_benchmark(
     overall_acc = (correct / total) * 100 if total > 0 else 0.0
     category_summary = {}
     for cat in CATEGORIES_LIST:
-        c_tot = cat_total.get(cat, 0)
-        c_corr = cat_correct.get(cat, 0)
+        c_tot = sum(v for k, v in cat_total.items() if str(k).strip().lower() == cat.lower())
+        c_corr = sum(v for k, v in cat_correct.items() if str(k).strip().lower() == cat.lower())
         category_summary[cat] = {
             "correct": c_corr,
             "total": c_tot,

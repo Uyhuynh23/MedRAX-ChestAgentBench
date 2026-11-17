@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple, Type, Any
+from typing import Dict, List, Optional, Tuple, Type, Any, Union
 from pathlib import Path
 from pydantic import BaseModel, Field
 
@@ -15,8 +15,8 @@ from langchain_core.tools import BaseTool
 class XRayVQAToolInput(BaseModel):
     """Input schema for the CheXagent Tool."""
 
-    image_paths: List[str] = Field(
-        ..., description="List of paths to chest X-ray images to analyze"
+    image_paths: Union[List[str], str] = Field(
+        ..., description="List of paths or a single path to chest X-ray images to analyze"
     )
     prompt: str = Field(..., description="Question or instruction about the chest X-ray images")
     max_new_tokens: int = Field(
@@ -144,6 +144,11 @@ class XRayVQATool(BaseTool):
             Tuple[Dict[str, Any], Dict]: Output dictionary and metadata dictionary
         """
         try:
+            if isinstance(image_paths, str):
+                image_paths = [image_paths]
+            else:
+                image_paths = list(image_paths)
+
             # Verify image paths
             for path in image_paths:
                 if not Path(path).is_file():
