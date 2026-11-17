@@ -230,13 +230,33 @@ class ChestXRaySegmentationTool(BaseTool):
     ) -> Tuple[Dict[str, Any], Dict]:
         """Run segmentation analysis for specified organs."""
         try:
-            # Validate and get organ indices
+            # Validate and get organ indices (auto-expand "Left/Right X" shorthands)
             if organs:
-                organs = [o.strip() for o in organs]
-                invalid_organs = [o for o in organs if o not in self.organ_map]
-                if invalid_organs:
-                    raise ValueError(f"Invalid organs specified: {invalid_organs}")
-                organ_indices = [self.organ_map[o] for o in organs]
+                if isinstance(organs, str):
+                    organs = [organs]
+                expanded = []
+                for o in organs:
+                    o_clean = str(o).strip()
+                    if o_clean.startswith("Left/Right "):
+                        base = o_clean.replace("Left/Right ", "").strip()
+                        expanded.extend([f"Left {base}", f"Right {base}"])
+                    elif o_clean.lower() in ["lung", "lungs"]:
+                        expanded.extend(["Left Lung", "Right Lung"])
+                    elif o_clean.lower() in ["clavicle", "clavicles"]:
+                        expanded.extend(["Left Clavicle", "Right Clavicle"])
+                    elif o_clean.lower() in ["scapula", "scapulae"]:
+                        expanded.extend(["Left Scapula", "Right Scapula"])
+                    elif o_clean.lower() in ["hilum", "hila", "hilus", "hilus pulmonis"]:
+                        expanded.extend(["Left Hilus Pulmonis", "Right Hilus Pulmonis"])
+                    else:
+                        expanded.append(o_clean)
+                valid_organs = [o for o in expanded if o in self.organ_map]
+                if valid_organs:
+                    organs = list(dict.fromkeys(valid_organs))
+                    organ_indices = [self.organ_map[o] for o in organs]
+                else:
+                    organ_indices = list(self.organ_map.values())
+                    organs = list(self.organ_map.keys())
             else:
                 organ_indices = list(self.organ_map.values())
                 organs = list(self.organ_map.keys())

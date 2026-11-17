@@ -41,13 +41,40 @@ CATEGORIES_LIST = [
     "Characterization",
 ]
 
-def encode_image_base64(image_path: str) -> Optional[str]:
+def encode_image_base64(image_path: str, max_dim: int = 1024) -> Optional[str]:
     try:
-        with open(image_path, "rb") as f:
-            return base64.b64encode(f.read()).decode("utf-8")
-    except Exception as e:
-        print(f"[Warning] Failed to read {image_path}: {e}")
-        return None
+        from PIL import Image
+        import io
+        with Image.open(image_path) as img:
+            img = img.convert("RGB")
+            if max(img.size) > max_dim:
+                img.thumbnail((max_dim, max_dim))
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            return base64.b64encode(buf.getvalue()).decode("utf-8")
+    except Exception:
+        try:
+            with open(image_path, "rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8")
+        except Exception as e:
+            print(f"[Warning] Failed to read {image_path}: {e}")
+            return None
+
+def extract_message_text(content: Any) -> str:
+    """Extracts text cleanly whether AIMessage.content is a string or a list of content blocks."""
+    if not content:
+        return ""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and "text" in item:
+                parts.append(str(item["text"]))
+        return "\n".join(parts).strip()
+    return str(content).strip()
 
 def extract_answer_letter(text: str) -> Optional[str]:
     """Robust extraction of A-F choice from model response."""
@@ -125,23 +152,26 @@ class GeminiKeyPool:
 
 GEMINI_KEY_POOL = GeminiKeyPool()
 
-def update_agent_api_key(agent, new_key: str):
-    """Updates API key in-place inside LangChain agent model without full reinitialization."""
+def update_agent_api_key(agent, new_key: str, model_name: str = "gemini-3.5-flash-lite"):
+    """Recreates the lightweight LLM client with the new API key and re-binds existing GPU tools."""
     if not agent or not new_key:
         return
-    if hasattr(agent, "model") and hasattr(agent.model, "bound"):
-        bound = agent.model.bound
-        if hasattr(bound, "google_api_key"):
-            bound.google_api_key = new_key
-            if hasattr(bound, "client"):
-                bound.client = None
-        if hasattr(bound, "api_key"):
-            bound.api_key = new_key
-            if hasattr(bound, "client"):
-                bound.client = None
-    os.environ["GOOGLE_API_KEY"] = new_key
-    os.environ["GEMINI_API_KEY"] = new_key
-    os.environ["OPENAI_API_KEY"] = new_key
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        gemini_model_name = model_name if "gemini" in str(model_name).lower() else "gemini-3.5-flash-lite"
+        new_llm = ChatGoogleGenerativeAI(
+            model=gemini_model_name,
+            google_api_key=new_key,
+            temperature=0.2,
+            top_p=0.95,
+        )
+        agent.raw_model = new_llm
+        agent.model = new_llm.bind_tools(list(agent.tools.values()))
+    except Exception:
+        if hasattr(agent, "model") and hasattr(agent.model, "bound"):
+            bound = agent.model.bound
+            if hasattr(bound, "api_key"):
+                bound.api_key = new_key
 
 def get_api_credentials(requested_model: str):
     """Auto-detects credentials and configures OpenAI, Local (Ollama/vLLM), or Gemini endpoints."""
@@ -157,22 +187,19 @@ def get_api_credentials(requested_model: str):
         return api_key, base_url, requested_model
 
     # 3. If no OpenAI key and no custom base_url, check for Google Gemini API key
-    if not api_key or api_key.startswith("your-"):
-        gemini_key_raw = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-        if gemini_key_raw:
+    gemini_key_raw = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if gemini_key_raw and ("gemini" in requested_model.lower() or not api_key or api_key.startswith("your-")):
+        if not GEMINI_KEY_POOL.has_keys():
             GEMINI_KEY_POOL.reload(gemini_key_raw)
-            active_gemini_key = GEMINI_KEY_POOL.get_key()
-            api_key = active_gemini_key
-            base_url = base_url or "https://generativelanguage.googleapis.com/v1beta/openai/"
-            if "gpt" in requested_model or requested_model == "chatgpt-4o-latest":
-                requested_model = "gemini-3.8-flash-lite"
-            # Set into env for LangChain/LangGraph tools
-            os.environ["OPENAI_API_KEY"] = active_gemini_key
-            os.environ["OPENAI_BASE_URL"] = base_url
+        active_gemini_key = GEMINI_KEY_POOL.get_key()
+        api_key = active_gemini_key
+        base_url = base_url or "https://generativelanguage.googleapis.com/v1beta/openai/"
+        if "gpt" in requested_model or requested_model == "chatgpt-4o-latest":
+            requested_model = "gemini-3.5-flash-lite"
 
     return api_key, base_url, requested_model
 
-def evaluate_baseline_gemini(example: Dict[str, Any], figures_dir: Path, model_name: str = "gemini-3.8-flash-lite", api_key: str = None) -> Dict[str, Any]:
+def evaluate_baseline_gemini(example: Dict[str, Any], figures_dir: Path, model_name: str = "gemini-3.5-flash-lite", api_key: str = None) -> Dict[str, Any]:
     """Native Google Gemini evaluation with automatic fallback across keys and available Flash models."""
     import google.generativeai as genai
     from PIL import Image
@@ -217,8 +244,8 @@ def evaluate_baseline_gemini(example: Dict[str, Any], figures_dir: Path, model_n
                 except Exception:
                     pass
 
-    # Model fallback hierarchy
-    candidate_models = [model_name, "gemini-3.8-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"]
+    # Model fallback hierarchy prioritizing gemini-3.5-flash-lite
+    candidate_models = [model_name, "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-flash-latest", "gemini-3.8-flash-lite", "gemini-3.8-flash"]
     candidate_models = list(dict.fromkeys([m for m in candidate_models if m]))
 
     raw_response = None
@@ -349,12 +376,13 @@ def evaluate_medrax_agent(example: Dict[str, Any], figures_dir: Path, agent: Any
             valid_map[Path(clean).name] = str(full_img_path)
             valid_map[str(clean)] = str(full_img_path)
             valid_map[str(img_rel)] = str(full_img_path)
-            b64 = encode_image_base64(str(full_img_path))
-            if b64:
-                content_list.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
-                })
+            if len(content_list) < 4:
+                b64 = encode_image_base64(str(full_img_path))
+                if b64:
+                    content_list.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+                    })
 
     agent.current_case_images = valid_map
 
@@ -388,17 +416,28 @@ def evaluate_medrax_agent(example: Dict[str, Any], figures_dir: Path, agent: Any
                         for tc in msg.tool_calls:
                             tools_used.append(tc.get("name", "tool"))
                     # ONLY record response from AIMessage text (never from ToolMessage)
-                    if msg.__class__.__name__ == "AIMessage" and msg.content and isinstance(msg.content, str) and msg.content.strip():
-                        final_content = msg.content
+                    if msg.__class__.__name__ == "AIMessage":
+                        msg_txt = extract_message_text(msg.content)
+                        if msg_txt:
+                            final_content = msg_txt
 
     # If final_content is still empty or tool message, retrieve last AIMessage from full thread history
     if not final_content:
         state = agent.workflow.get_state(thread)
         if state and hasattr(state, "values") and "messages" in state.values:
             for msg in reversed(state.values["messages"]):
-                if msg.__class__.__name__ == "AIMessage" and msg.content and isinstance(msg.content, str) and msg.content.strip():
-                    final_content = msg.content
-                    break
+                if msg.__class__.__name__ == "AIMessage":
+                    msg_txt = extract_message_text(msg.content)
+                    if msg_txt:
+                        final_content = msg_txt
+                        break
+
+    # Advance round-robin key pool for next question in MedRAX mode to distribute RPM load across keys
+    if "gemini" in model_name.lower() and len(GEMINI_KEY_POOL.keys) > 1:
+        GEMINI_KEY_POOL.advance()
+        next_key = GEMINI_KEY_POOL.get_key()
+        if next_key:
+            update_agent_api_key(agent, next_key, model_name=model_name)
 
     pred_letter = extract_answer_letter(final_content)
     return {
@@ -548,8 +587,17 @@ def run_benchmark(
                     if any(k in err_str for k in ["429", "quota", "resource_exhausted", "rate limit", "too many requests"]):
                         new_k = GEMINI_KEY_POOL.mark_exhausted_and_switch(str(e_inner))
                         if mode == "medrax" and new_k and agent:
-                            update_agent_api_key(agent, new_k)
+                            update_agent_api_key(agent, new_k, model_name=model_name)
                         time.sleep(2)
+                        continue
+                    if mode == "medrax" and ("404" in err_str or "not found" in err_str) and "gemini" in model_name.lower():
+                        for fb_model in ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-flash-latest", "gemini-3.8-flash-lite", "gemini-3.8-flash"]:
+                            if fb_model != model_name:
+                                model_name = fb_model
+                                active_k = GEMINI_KEY_POOL.get_key() or os.getenv("GOOGLE_API_KEY")
+                                if active_k and agent:
+                                    update_agent_api_key(agent, active_k, model_name=model_name)
+                                break
                         continue
                     if attempt < 2 and any(k in err_str for k in ["connection", "connect", "timeout"]):
                         time.sleep(3 * (attempt + 1))

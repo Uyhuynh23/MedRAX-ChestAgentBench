@@ -99,6 +99,7 @@ class Agent:
 
         self.workflow = workflow.compile(checkpointer=checkpointer)
         self.tools = {t.name: t for t in tools}
+        self.raw_model = model
         self.model = model.bind_tools(tools)
 
     def process_request(self, state: AgentState) -> Dict[str, List[AnyMessage]]:
@@ -114,7 +115,13 @@ class Agent:
         messages = state["messages"]
         if self.system_prompt:
             messages = [SystemMessage(content=self.system_prompt)] + messages
-        response = self.model.invoke(messages)
+
+        # Prevent infinite tool loops: after 3 tool results, force final clinical synthesis
+        tool_msg_count = sum(1 for m in state["messages"] if isinstance(m, ToolMessage))
+        if tool_msg_count >= 3 and hasattr(self, "raw_model") and self.raw_model is not None:
+            response = self.raw_model.invoke(messages)
+        else:
+            response = self.model.invoke(messages)
         return {"messages": [response]}
 
     def has_tool_calls(self, state: AgentState) -> bool:
@@ -128,7 +135,7 @@ class Agent:
             bool: True if tool calls exist, False otherwise.
         """
         response = state["messages"][-1]
-        return len(response.tool_calls) > 0
+        return bool(getattr(response, "tool_calls", None)) and len(response.tool_calls) > 0
 
     def execute_tools(self, state: AgentState) -> Dict[str, List[ToolMessage]]:
         """
@@ -168,12 +175,15 @@ class Agent:
         results = []
 
         for call in tool_calls:
-            # Auto-sanitize image arguments if LLM passes relative path or file://
+            # Auto-sanitize image arguments if LLM passes relative path, file://, or string instead of list
             args = dict(call.get("args", {}))
             if "image_path" in args and isinstance(args["image_path"], str):
                 args["image_path"] = sanitize_path(args["image_path"])
-            if "image_paths" in args and isinstance(args["image_paths"], list):
-                args["image_paths"] = [sanitize_path(p) for p in args["image_paths"]]
+            if "image_paths" in args:
+                if isinstance(args["image_paths"], str):
+                    args["image_paths"] = [sanitize_path(args["image_paths"])]
+                elif isinstance(args["image_paths"], list):
+                    args["image_paths"] = [sanitize_path(p) for p in args["image_paths"]]
 
             print(f"Executing tool: {{'name': '{call['name']}', 'args': {args}}}")
             if call["name"] not in self.tools:
@@ -184,7 +194,7 @@ class Agent:
 
             results.append(
                 ToolMessage(
-                    tool_call_id=call["id"],
+                    tool_call_id=str(call.get("id") or f"call_{call['name']}"),
                     name=call["name"],
                     args=args,
                     content=str(result),
