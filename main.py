@@ -116,7 +116,7 @@ def initialize_agent(
     elif gemini_key and ("gemini" in str(model).lower() or not os.getenv("OPENAI_API_KEY")):
         try:
             from langchain_google_genai import ChatGoogleGenerativeAI
-            gemini_model_name = model if "gemini" in str(model).lower() else "gemini-3.8-flash"
+            gemini_model_name = model if "gemini" in str(model).lower() else "gemini-3.8-flash-lite"
             model_instance = ChatGoogleGenerativeAI(
                 model=gemini_model_name,
                 google_api_key=gemini_key,
