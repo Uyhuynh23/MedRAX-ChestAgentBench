@@ -133,15 +133,6 @@ class Agent:
                 time.sleep(target_interval - elapsed)
             self._last_api_call_ts = time.time()
 
-        # After tool results are collected, instruct the model to synthesize final answer without extra tool loops
-        tool_msg_count = sum(1 for m in state["messages"] if isinstance(m, ToolMessage))
-        if tool_msg_count >= 2:
-            messages = messages + [
-                HumanMessage(
-                    content="All necessary radiology tool outputs have been provided above. Do not call any more tools. Synthesize the findings and conclude with 'Answer: X' (where X is A, B, C, D, E, or F)."
-                )
-            ]
-
         response = self.model.invoke(messages)
         return {"messages": [response]}
 
@@ -155,8 +146,9 @@ class Agent:
         Returns:
             bool: True if tool calls exist, False otherwise.
         """
-        tool_msg_count = sum(1 for m in state["messages"] if isinstance(m, ToolMessage))
-        if tool_msg_count >= 3:
+        # Count tool-calling turns (not individual parallel ToolMessages!)
+        tool_turns = sum(1 for m in state["messages"][:-1] if getattr(m, "tool_calls", None))
+        if tool_turns >= 2:
             return False
         response = state["messages"][-1]
         return bool(getattr(response, "tool_calls", None)) and len(response.tool_calls) > 0
@@ -221,7 +213,7 @@ class Agent:
                     tool_call_id=str(call.get("id") or f"call_{call['name']}"),
                     name=call["name"],
                     args=args,
-                    content=str(result),
+                    content=str(result)[:2500],
                 )
             )
 

@@ -375,17 +375,40 @@ def evaluate_medrax_agent(example: Dict[str, Any], figures_dir: Path, agent: Any
     _run_stream(messages, thread)
 
     # If final_content is still empty, retrieve last AIMessage from full thread history
-    if not final_content:
-        state = agent.workflow.get_state(thread)
-        if state and hasattr(state, "values") and "messages" in state.values:
-            for msg in reversed(state.values["messages"]):
-                if msg.__class__.__name__ == "AIMessage":
-                    msg_txt = extract_message_text(msg.content, msg)
-                    if msg_txt:
-                        final_content = msg_txt
-                        break
+    state = agent.workflow.get_state(thread)
+    if not final_content and state and hasattr(state, "values") and "messages" in state.values:
+        for msg in reversed(state.values["messages"]):
+            if msg.__class__.__name__ == "AIMessage":
+                msg_txt = extract_message_text(msg.content, msg)
+                if msg_txt:
+                    final_content = msg_txt
+                    break
 
     pred_letter = extract_answer_letter(final_content)
+
+    # For local Ollama models only: if model ended on a tool call without final Answer letter, force 1 text synthesis call
+    is_local_endpoint = any(k in base_url_str for k in ["localhost", "127.0.0.1"])
+    if is_local_endpoint and not pred_letter and hasattr(agent, "raw_model") and agent.raw_model is not None:
+        tool_outputs = []
+        if state and hasattr(state, "values") and "messages" in state.values:
+            for msg in state.values["messages"]:
+                if msg.__class__.__name__ == "ToolMessage" and getattr(msg, "content", None):
+                    t_name = getattr(msg, "name", "tool")
+                    tool_outputs.append(f"[{t_name}]: {str(msg.content)[:1200]}")
+        synth_prompt = (
+            f"{instruction}\n\n"
+            f"Radiology Tool Findings:\n" + ("\n".join(tool_outputs) if tool_outputs else "No additional tool findings.") + "\n\n"
+            f"Based on the findings above, state your clinical conclusion and end explicitly with 'Answer: X' (where X is A, B, C, D, E, or F)."
+        )
+        try:
+            synth_resp = agent.raw_model.invoke([HumanMessage(content=synth_prompt)])
+            synth_txt = extract_message_text(getattr(synth_resp, "content", ""), synth_resp)
+            if synth_txt:
+                final_content = synth_txt
+                pred_letter = extract_answer_letter(final_content)
+        except Exception:
+            pass
+
     return {
         "raw_response": final_content,
         "prediction": pred_letter,

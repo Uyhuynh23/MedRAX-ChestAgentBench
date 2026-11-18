@@ -112,7 +112,7 @@ def initialize_agent(
 
     if is_custom_endpoint:
         print(f"Agent using custom OpenAI-compatible endpoint: {base_url_env} (model: {model})")
-        model_instance = ChatOpenAI(model=model, temperature=temperature, top_p=top_p, max_tokens=2048, **openai_kwargs)
+        model_instance = ChatOpenAI(model=model, temperature=temperature, top_p=top_p, max_tokens=1024, **openai_kwargs)
     elif gemini_key and ("gemini" in str(model).lower() or not os.getenv("OPENAI_API_KEY")):
         try:
             from langchain_google_genai import ChatGoogleGenerativeAI
