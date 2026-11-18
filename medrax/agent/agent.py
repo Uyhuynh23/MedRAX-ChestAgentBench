@@ -114,22 +114,23 @@ class Agent:
         """
         import os
         import time
+        import random
         from langchain_core.messages import HumanMessage
 
         messages = list(state["messages"])
         if self.system_prompt:
             messages = [SystemMessage(content=self.system_prompt)] + messages
 
-        # Smart Rate Pacer for Cloud Gemini API (maximizes throughput at ~14.2 RPM while preventing 429/abuse flags)
-        # Note: When local GPU tools run (~6-10s), elapsed >= 4.2s naturally so 0s is wasted!
+        # Smart Rate Pacer with Random Jitter for Cloud Gemini API (~10 RPM safe pacing, prevents bot/abuse flags)
+        # Note: When local GPU tools run (~7-10s), elapsed >= target_interval naturally so 0s is wasted!
         base_url_env = (os.getenv("OPENAI_BASE_URL") or "").lower()
         is_local = any(k in base_url_env for k in ["localhost", "127.0.0.1"])
         if not is_local and (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")):
-            min_interval = 4.2
+            target_interval = 5.2 + random.uniform(0.4, 1.4)
             last_ts = getattr(self, "_last_api_call_ts", 0.0)
             elapsed = time.time() - last_ts
-            if elapsed < min_interval:
-                time.sleep(min_interval - elapsed)
+            if elapsed < target_interval:
+                time.sleep(target_interval - elapsed)
             self._last_api_call_ts = time.time()
 
         # After tool results are collected, instruct the model to synthesize final answer without extra tool loops

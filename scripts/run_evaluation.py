@@ -119,17 +119,19 @@ def extract_answer_letter(text: str) -> Optional[str]:
     return None
 
 class DailyQuotaExhaustedError(RuntimeError):
-    """Raised when the single active account reaches its daily quota limit, triggering a safe save & stop."""
+    """Raised on the very first 429/quota response to immediately flush to Drive and stop with ZERO retries."""
     pass
 
 _LAST_GEMINI_CALL_TS = 0.0
 
-def wait_for_gemini_rate_limit(min_interval: float = 4.2):
-    """Paces consecutive Gemini API calls to ~14.2 RPM (maximizing speed safely below the 15 RPM Free Tier limit)."""
+def wait_for_gemini_rate_limit(base_interval: float = 5.2):
+    """Paces consecutive Gemini API calls with human-like random jitter (5.6s-6.6s ~ 9.5-10 RPM) to never trigger 15 RPM or bot flags."""
+    import random
     global _LAST_GEMINI_CALL_TS
+    target_interval = base_interval + random.uniform(0.4, 1.4)
     elapsed = time.time() - _LAST_GEMINI_CALL_TS
-    if elapsed < min_interval:
-        time.sleep(min_interval - elapsed)
+    if elapsed < target_interval:
+        time.sleep(target_interval - elapsed)
     _LAST_GEMINI_CALL_TS = time.time()
 
 def get_api_credentials(requested_model: str):
@@ -207,24 +209,16 @@ def evaluate_baseline_gemini(example: Dict[str, Any], figures_dir: Path, model_n
     raw_response = None
     m = genai.GenerativeModel(model_name)
 
-    for attempt in range(2):
-        wait_for_gemini_rate_limit(min_interval=4.2)
-        try:
-            resp = m.generate_content(parts)
-            raw_response = resp.text
-            break
-        except Exception as e:
-            err_str = str(e).lower()
-            if any(k in err_str for k in ["429", "quota", "resource_exhausted", "rate limit", "too many requests"]):
-                # If explicitly daily quota or prepayment depleted, stop immediately without retrying
-                if any(d in err_str for d in ["perday", "per_day", "daily", "prepayment", "abuse"]):
-                    raise DailyQuotaExhaustedError(str(e))
-                if attempt == 0:
-                    print("  ⏳ [Rate Limit 429] Cooling down 65s for 1-minute RPM window reset (single retry)...")
-                    time.sleep(65)
-                    continue
-                raise DailyQuotaExhaustedError(str(e))
-            raise RuntimeError(f"Gemini API error ({model_name}): {e}")
+    wait_for_gemini_rate_limit(base_interval=5.2)
+    try:
+        resp = m.generate_content(parts)
+        raw_response = resp.text
+    except Exception as e:
+        err_str = str(e).lower()
+        if any(k in err_str for k in ["429", "quota", "resource_exhausted", "rate limit", "too many requests"]):
+            # Zero-retry policy on 429: stop immediately so we NEVER send repeated requests after a quota block
+            raise DailyQuotaExhaustedError(str(e))
+        raise RuntimeError(f"Gemini API error ({model_name}): {e}")
 
     pred_letter = extract_answer_letter(raw_response)
     return {
@@ -404,6 +398,7 @@ def run_benchmark(
     mode: str = "baseline",
     model_name: str = "chatgpt-4o-latest",
     max_cases: Optional[int] = None,
+    max_questions: Optional[int] = None,
     tool_list: Optional[List[str]] = None,
     device: str = "cuda",
     resume: bool = True,
@@ -515,10 +510,18 @@ def run_benchmark(
             out_f.flush()
             os.fsync(out_f.fileno())
 
+    session_evaluated = 0
     for idx, row in enumerate(rows, 1):
         qid = str(row.get("question_id", ""))
         if qid in done_ids:
             continue
+
+        if max_questions is not None and session_evaluated >= max_questions:
+            if pending_records:
+                flush_batch(pending_records)
+                pending_records = []
+            print(f"\n✅ [Session Cap Reached] Evaluated {session_evaluated} new questions in this session (--max-questions {max_questions}). All progress synced to Google Drive!")
+            break
 
         gold_ans = str(row.get("answer", "")).strip().upper()
         raw_cats = row.get("categories") or row.get("category") or ""
@@ -526,34 +529,25 @@ def run_benchmark(
 
         try:
             res = None
-            for attempt in range(2):
-                try:
-                    if mode == "medrax":
-                        res = evaluate_medrax_agent(row, figures_dir, agent, thread_id=f"t_{idx}_{attempt}", model_name=model_name)
-                    else:
-                        res = evaluate_baseline_mllm(row, figures_dir, model_name=model_name)
-                    break
-                except DailyQuotaExhaustedError:
-                    raise
-                except Exception as e_inner:
-                    err_str = str(e_inner).lower()
-                    if any(k in err_str for k in ["429", "quota", "resource_exhausted", "rate limit", "too many requests"]):
-                        if any(d in err_str for d in ["perday", "per_day", "daily", "prepayment", "abuse"]):
-                            raise DailyQuotaExhaustedError(str(e_inner))
-                        if attempt == 0:
-                            print("  ⏳ [Rate Limit 429] Cooling down 65s for 1-minute RPM window reset (single retry)...")
-                            time.sleep(65)
-                            continue
-                        raise DailyQuotaExhaustedError(str(e_inner))
-                    if attempt == 0 and any(k in err_str for k in ["connection", "connect", "timeout"]):
-                        time.sleep(4)
-                        continue
-                    raise e_inner
+            try:
+                if mode == "medrax":
+                    res = evaluate_medrax_agent(row, figures_dir, agent, thread_id=f"t_{idx}_0", model_name=model_name)
+                else:
+                    res = evaluate_baseline_mllm(row, figures_dir, model_name=model_name)
+            except DailyQuotaExhaustedError:
+                raise
+            except Exception as e_inner:
+                err_str = str(e_inner).lower()
+                if any(k in err_str for k in ["429", "quota", "resource_exhausted", "rate limit", "too many requests"]):
+                    # Zero-retry policy on 429: never send repeated requests after a quota block
+                    raise DailyQuotaExhaustedError(str(e_inner))
+                raise e_inner
 
             pred_letter = res.get("prediction")
             is_correct = (pred_letter == gold_ans)
 
             total += 1
+            session_evaluated += 1
             if is_correct:
                 correct += 1
 
@@ -664,6 +658,7 @@ if __name__ == "__main__":
     parser.add_argument("--data-dir", type=str, default=os.getenv("BENCHMARK_DATA_DIR", "./data/chestagentbench"))
     parser.add_argument("--output-dir", type=str, default=os.getenv("MEDRAX_RESULTS_DIR", "./results"))
     parser.add_argument("--max-cases", type=int, default=None)
+    parser.add_argument("--max-questions", type=int, default=None, help="Maximum number of new questions to evaluate in this session")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--reset", action="store_true", help="Clear all previous predictions to evaluate completely fresh (100%%) under this model")
@@ -688,6 +683,7 @@ if __name__ == "__main__":
         mode=args.mode,
         model_name=args.model,
         max_cases=args.max_cases,
+        max_questions=args.max_questions,
         tool_list=default_tools,
         device=args.device,
         resume=(not args.no_resume and not args.reset),
