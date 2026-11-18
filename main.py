@@ -122,6 +122,7 @@ def initialize_agent(
                 google_api_key=gemini_key,
                 temperature=temperature,
                 top_p=top_p,
+                max_retries=1,
             )
             print(f"Agent using native Google Gemini model: {gemini_model_name}")
         except Exception as e:

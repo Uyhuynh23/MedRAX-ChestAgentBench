@@ -112,16 +112,36 @@ class Agent:
         Returns:
             Dict[str, List[AnyMessage]]: A dictionary containing the model's response.
         """
-        messages = state["messages"]
+        import os
+        import time
+        from langchain_core.messages import HumanMessage
+
+        messages = list(state["messages"])
         if self.system_prompt:
             messages = [SystemMessage(content=self.system_prompt)] + messages
 
-        # Prevent infinite tool loops: after 3 tool results, force final clinical synthesis
+        # Smart Rate Pacer for Cloud Gemini API (maximizes throughput at ~14.2 RPM while preventing 429/abuse flags)
+        # Note: When local GPU tools run (~6-10s), elapsed >= 4.2s naturally so 0s is wasted!
+        base_url_env = (os.getenv("OPENAI_BASE_URL") or "").lower()
+        is_local = any(k in base_url_env for k in ["localhost", "127.0.0.1"])
+        if not is_local and (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")):
+            min_interval = 4.2
+            last_ts = getattr(self, "_last_api_call_ts", 0.0)
+            elapsed = time.time() - last_ts
+            if elapsed < min_interval:
+                time.sleep(min_interval - elapsed)
+            self._last_api_call_ts = time.time()
+
+        # After tool results are collected, instruct the model to synthesize final answer without extra tool loops
         tool_msg_count = sum(1 for m in state["messages"] if isinstance(m, ToolMessage))
-        if tool_msg_count >= 3 and hasattr(self, "raw_model") and self.raw_model is not None:
-            response = self.raw_model.invoke(messages)
-        else:
-            response = self.model.invoke(messages)
+        if tool_msg_count >= 2:
+            messages = messages + [
+                HumanMessage(
+                    content="All necessary radiology tool outputs have been provided above. Do not call any more tools. Synthesize the findings and conclude with 'Answer: X' (where X is A, B, C, D, E, or F)."
+                )
+            ]
+
+        response = self.model.invoke(messages)
         return {"messages": [response]}
 
     def has_tool_calls(self, state: AgentState) -> bool:
@@ -134,6 +154,9 @@ class Agent:
         Returns:
             bool: True if tool calls exist, False otherwise.
         """
+        tool_msg_count = sum(1 for m in state["messages"] if isinstance(m, ToolMessage))
+        if tool_msg_count >= 3:
+            return False
         response = state["messages"][-1]
         return bool(getattr(response, "tool_calls", None)) and len(response.tool_calls) > 0
 

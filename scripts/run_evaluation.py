@@ -118,75 +118,22 @@ def extract_answer_letter(text: str) -> Optional[str]:
             return match.group(1).upper()
     return None
 
-class GeminiKeyPool:
-    """Manages rotation and failover across multiple Gemini API keys."""
+class DailyQuotaExhaustedError(RuntimeError):
+    """Raised when the single active account reaches its daily quota limit, triggering a safe save & stop."""
+    pass
 
-    def __init__(self, key_str: Optional[str] = None):
-        self.reload(key_str)
+_LAST_GEMINI_CALL_TS = 0.0
 
-    def reload(self, key_str: Optional[str] = None):
-        raw = key_str or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
-        self.keys = [k.strip() for k in raw.split(",") if k.strip()]
-        self.idx = 0
-        self.exhausted = set()
-
-    def has_keys(self) -> bool:
-        return len(self.keys) > 0
-
-    def get_key(self) -> Optional[str]:
-        if not self.keys:
-            return None
-        for _ in range(len(self.keys)):
-            k = self.keys[self.idx]
-            if k not in self.exhausted:
-                return k
-            self.idx = (self.idx + 1) % len(self.keys)
-        self.exhausted.clear()
-        return self.keys[self.idx]
-
-    def advance(self):
-        """Round-robin step to keep per-key rate limits low."""
-        if len(self.keys) > 1:
-            self.idx = (self.idx + 1) % len(self.keys)
-
-    def mark_exhausted_and_switch(self, err_msg: str = "") -> Optional[str]:
-        if not self.keys:
-            return None
-        bad_key = self.keys[self.idx]
-        self.exhausted.add(bad_key)
-        old_idx = self.idx
-        self.idx = (self.idx + 1) % len(self.keys)
-        new_key = self.keys[self.idx]
-        masked_old = f"...{bad_key[-6:]}" if len(bad_key) >= 6 else "***"
-        masked_new = f"...{new_key[-6:]}" if len(new_key) >= 6 else "***"
-        print(f"  🔄 [Key Rotation] Key #{old_idx+1} ({masked_old}) hit limit. Switched to Key #{self.idx+1} ({masked_new}). Reason: {err_msg[:60]}")
-        return new_key
-
-GEMINI_KEY_POOL = GeminiKeyPool()
-
-def update_agent_api_key(agent, new_key: str, model_name: str = "gemini-3.5-flash-lite"):
-    """Recreates the lightweight LLM client with the new API key and re-binds existing GPU tools."""
-    if not agent or not new_key:
-        return
-    try:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        gemini_model_name = model_name if "gemini" in str(model_name).lower() else "gemini-3.5-flash-lite"
-        new_llm = ChatGoogleGenerativeAI(
-            model=gemini_model_name,
-            google_api_key=new_key,
-            temperature=0.2,
-            top_p=0.95,
-        )
-        agent.raw_model = new_llm
-        agent.model = new_llm.bind_tools(list(agent.tools.values()))
-    except Exception:
-        if hasattr(agent, "model") and hasattr(agent.model, "bound"):
-            bound = agent.model.bound
-            if hasattr(bound, "api_key"):
-                bound.api_key = new_key
+def wait_for_gemini_rate_limit(min_interval: float = 4.2):
+    """Paces consecutive Gemini API calls to ~14.2 RPM (maximizing speed safely below the 15 RPM Free Tier limit)."""
+    global _LAST_GEMINI_CALL_TS
+    elapsed = time.time() - _LAST_GEMINI_CALL_TS
+    if elapsed < min_interval:
+        time.sleep(min_interval - elapsed)
+    _LAST_GEMINI_CALL_TS = time.time()
 
 def get_api_credentials(requested_model: str):
-    """Auto-detects credentials and configures OpenAI, Local (Ollama/vLLM), or Gemini endpoints."""
+    """Auto-detects credentials and configures OpenAI, Local (Ollama/vLLM), or single-key Gemini endpoints."""
     api_key = os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("OPENAI_BASE_URL", None)
 
@@ -198,12 +145,10 @@ def get_api_credentials(requested_model: str):
     if base_url and ("groq" in base_url or "api." in base_url):
         return api_key, base_url, requested_model
 
-    # 3. If no OpenAI key and no custom base_url, check for Google Gemini API key
+    # 3. Single-account Google Gemini API key
     gemini_key_raw = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
     if gemini_key_raw and ("gemini" in requested_model.lower() or not api_key or api_key.startswith("your-")):
-        if not GEMINI_KEY_POOL.has_keys():
-            GEMINI_KEY_POOL.reload(gemini_key_raw)
-        active_gemini_key = GEMINI_KEY_POOL.get_key()
+        active_gemini_key = gemini_key_raw.split(",")[0].strip()
         api_key = active_gemini_key
         base_url = base_url or "https://generativelanguage.googleapis.com/v1beta/openai/"
         if "gpt" in requested_model or requested_model == "chatgpt-4o-latest":
@@ -212,9 +157,12 @@ def get_api_credentials(requested_model: str):
     return api_key, base_url, requested_model
 
 def evaluate_baseline_gemini(example: Dict[str, Any], figures_dir: Path, model_name: str = "gemini-3.5-flash-lite", api_key: str = None) -> Dict[str, Any]:
-    """Native Google Gemini evaluation with automatic fallback across keys and available Flash models."""
+    """Single-key native Google Gemini evaluation with smart rate pacing and safe daily-quota stop."""
     import google.generativeai as genai
     from PIL import Image
+
+    active_key = (api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").split(",")[0].strip()
+    genai.configure(api_key=active_key)
 
     prompt = (
         f"You are an expert thoracic radiologist.\n"
@@ -256,42 +204,27 @@ def evaluate_baseline_gemini(example: Dict[str, Any], figures_dir: Path, model_n
                 except Exception:
                     pass
 
-    # Model fallback hierarchy prioritizing gemini-3.5-flash-lite
-    candidate_models = [model_name, "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-flash-latest", "gemini-3.8-flash-lite", "gemini-3.8-flash"]
-    candidate_models = list(dict.fromkeys([m for m in candidate_models if m]))
-
     raw_response = None
-    last_err = None
+    m = genai.GenerativeModel(model_name)
 
-    max_key_attempts = max(1, len(GEMINI_KEY_POOL.keys))
-    for _ in range(max_key_attempts):
-        active_key = GEMINI_KEY_POOL.get_key() or api_key
-        genai.configure(api_key=active_key)
-        hit_quota = False
-
-        for cand in candidate_models:
-            try:
-                m = genai.GenerativeModel(cand)
-                resp = m.generate_content(parts)
-                raw_response = resp.text
-                GEMINI_KEY_POOL.advance()
-                break
-            except Exception as e:
-                last_err = e
-                err_str = str(e).lower()
-                if any(k in err_str for k in ["429", "quota", "resource_exhausted", "rate limit", "too many requests"]):
-                    GEMINI_KEY_POOL.mark_exhausted_and_switch(str(e))
-                    hit_quota = True
-                    break
-                continue
-
-        if raw_response is not None:
+    for attempt in range(2):
+        wait_for_gemini_rate_limit(min_interval=4.2)
+        try:
+            resp = m.generate_content(parts)
+            raw_response = resp.text
             break
-        if not hit_quota:
-            break
-
-    if raw_response is None:
-        raise RuntimeError(f"Gemini API generation failed across candidate models and keys: {last_err}")
+        except Exception as e:
+            err_str = str(e).lower()
+            if any(k in err_str for k in ["429", "quota", "resource_exhausted", "rate limit", "too many requests"]):
+                # If explicitly daily quota or prepayment depleted, stop immediately without retrying
+                if any(d in err_str for d in ["perday", "per_day", "daily", "prepayment", "abuse"]):
+                    raise DailyQuotaExhaustedError(str(e))
+                if attempt == 0:
+                    print("  ⏳ [Rate Limit 429] Cooling down 65s for 1-minute RPM window reset (single retry)...")
+                    time.sleep(65)
+                    continue
+                raise DailyQuotaExhaustedError(str(e))
+            raise RuntimeError(f"Gemini API error ({model_name}): {e}")
 
     pred_letter = extract_answer_letter(raw_response)
     return {
@@ -445,16 +378,7 @@ def evaluate_medrax_agent(example: Dict[str, Any], figures_dir: Path, agent: Any
                             if msg_txt:
                                 final_content = msg_txt
 
-    try:
-        _run_stream(messages, thread)
-    except Exception as e_stream:
-        if is_vision and content_list:
-            # Fallback to text instruction if multimodal + tool_calls stream encountered protocol error
-            fb_thread = {"configurable": {"thread_id": f"{thread_id}_fb"}}
-            _run_stream([HumanMessage(content=instruction)], fb_thread)
-            thread = fb_thread
-        else:
-            raise e_stream
+    _run_stream(messages, thread)
 
     # If final_content is still empty, retrieve last AIMessage from full thread history
     if not final_content:
@@ -602,33 +526,27 @@ def run_benchmark(
 
         try:
             res = None
-            max_attempts = max(3, len(GEMINI_KEY_POOL.keys) * 2)
-            for attempt in range(max_attempts):
+            for attempt in range(2):
                 try:
                     if mode == "medrax":
                         res = evaluate_medrax_agent(row, figures_dir, agent, thread_id=f"t_{idx}_{attempt}", model_name=model_name)
                     else:
                         res = evaluate_baseline_mllm(row, figures_dir, model_name=model_name)
                     break
+                except DailyQuotaExhaustedError:
+                    raise
                 except Exception as e_inner:
                     err_str = str(e_inner).lower()
                     if any(k in err_str for k in ["429", "quota", "resource_exhausted", "rate limit", "too many requests"]):
-                        new_k = GEMINI_KEY_POOL.mark_exhausted_and_switch(str(e_inner))
-                        if mode == "medrax" and new_k and agent:
-                            update_agent_api_key(agent, new_k, model_name=model_name)
-                        time.sleep(2)
-                        continue
-                    if mode == "medrax" and ("404" in err_str or "not found" in err_str) and "gemini" in model_name.lower():
-                        for fb_model in ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-flash-latest", "gemini-3.8-flash-lite", "gemini-3.8-flash"]:
-                            if fb_model != model_name:
-                                model_name = fb_model
-                                active_k = GEMINI_KEY_POOL.get_key() or os.getenv("GOOGLE_API_KEY")
-                                if active_k and agent:
-                                    update_agent_api_key(agent, active_k, model_name=model_name)
-                                break
-                        continue
-                    if attempt < 2 and any(k in err_str for k in ["connection", "connect", "timeout"]):
-                        time.sleep(3 * (attempt + 1))
+                        if any(d in err_str for d in ["perday", "per_day", "daily", "prepayment", "abuse"]):
+                            raise DailyQuotaExhaustedError(str(e_inner))
+                        if attempt == 0:
+                            print("  ⏳ [Rate Limit 429] Cooling down 65s for 1-minute RPM window reset (single retry)...")
+                            time.sleep(65)
+                            continue
+                        raise DailyQuotaExhaustedError(str(e_inner))
+                    if attempt == 0 and any(k in err_str for k in ["connection", "connect", "timeout"]):
+                        time.sleep(4)
                         continue
                     raise e_inner
 
@@ -661,12 +579,31 @@ def run_benchmark(
             status_symbol = "✓" if is_correct else "✗"
             print(f"[{idx}/{len(rows)}] QID: {qid} | Pred: {pred_letter} Gold: {gold_ans} {status_symbol} | Running Acc: {curr_acc:.2f}% ({correct}/{total})")
 
-            # Batch commit: force-sync every BATCH_SIZE questions to Google Drive
+            # Batch commit: force-sync every BATCH_SIZE (10) questions to Google Drive
             if len(pending_records) >= BATCH_SIZE:
                 flush_batch(pending_records)
                 pending_records = []
-                print(f"  [Drive Sync] Flushed batch to Google Drive at question {idx}.")
+                print(f"  [Drive Sync] Flushed batch of 10 to Google Drive at question {idx}.")
 
+        except DailyQuotaExhaustedError as e_quota:
+            if pending_records:
+                flush_batch(pending_records)
+                print(f"  [Drive Sync] Emergency flush: {len(pending_records)} pending records saved to Google Drive.")
+                pending_records = []
+            print("\n=======================================================")
+            print(f" 🛑 [DAILY QUOTA REACHED - SAFE STOP AT QUESTION {idx}/{len(rows)}]")
+            print(f" Reason: {str(e_quota)[:120]}")
+            print(f" ✅ All {total} evaluated questions are safely saved to Google Drive!")
+            print(f" 👉 Next Step: Switch to your next Google Account API Key and re-run this cell (without --reset) to continue from question {idx}!")
+            print("=======================================================\n")
+            break
+        except KeyboardInterrupt:
+            if pending_records:
+                flush_batch(pending_records)
+                print(f"\n  [Drive Sync] Interrupted! Flushed {len(pending_records)} pending records safely to Google Drive.")
+                pending_records = []
+            print(f"\n[Stopped by User] Safely saved {total} evaluated questions to Google Drive.")
+            break
         except Exception as e:
             print(f"[Error processing QID {qid}]: {e}")
             # Flush any pending records before sleeping to avoid data loss
